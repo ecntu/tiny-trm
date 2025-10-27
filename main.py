@@ -5,12 +5,14 @@
 #     "torch",
 #     "datasets",
 #     "ema-pytorch",
+#     "tqdm",
 # ]
 # ///
 
 # A single-file implementation of the Tiny Recursive Model (TRM) trained on Sudoku.
 # Paper: https://arxiv.org/abs/2305.10445
 
+import os
 import argparse
 import torch
 import torch.nn as nn
@@ -23,6 +25,7 @@ from einops.layers.torch import Rearrange
 
 from ema_pytorch import EMA
 from datasets import load_dataset
+from tqdm import tqdm
 
 
 class TRM(nn.Module):
@@ -166,7 +169,7 @@ def train_batch(
 def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
     model.eval()
     total, correct = 0, 0
-    for batch in data_loader:
+    for batch in tqdm(data_loader, desc="Evaluating"):
         x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
         y_hats_logits = model.predict(x_input, N_supervision=N_supervision, n=n, T=T)
         total += y_true.numel()
@@ -206,6 +209,9 @@ if __name__ == "__main__":
     parser.add_argument("--ema_beta", type=float, default=0.999)
     parser.add_argument("--epochs", type=int, default=60_000)
 
+    parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -219,19 +225,26 @@ if __name__ == "__main__":
         h_dim=args.h_dim,
         h_factor=4,
     ).to(device)
+
+    model = torch.compile(model)
     ema = EMA(model, beta=args.ema_beta)
 
     print(model)
 
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
+
     train_ds = load_dataset(ds_path, split="train")
     train_ds.set_format(type="torch", columns=["inputs", "labels"])
 
     val_ds = load_dataset(ds_path, split="test[:1024]")
     val_ds.set_format(type="torch", columns=["inputs", "labels"])
 
+    test_ds = load_dataset(ds_path, split="test")
+    test_ds.set_format(type="torch", columns=["inputs", "labels"])
+
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
     opt = optim.AdamW(
         model.parameters(),
@@ -243,29 +256,61 @@ if __name__ == "__main__":
         opt, start_factor=0.1, total_iters=args.lr_warmup_iters
     )
 
-    for epoch in range(args.epochs):
-        for i, batch in enumerate(train_loader):
-            print(f"Epoch {epoch} | Batch {i}")
-            train_batch(
+    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
+        checkpoint = torch.load(args.checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        opt.load_state_dict(checkpoint["opt_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        print(f"Loaded checkpoint from {args.checkpoint_path}")
+
+    if not args.eval_only:
+        # train loop
+        for epoch in range(args.epochs):
+            for i, batch in enumerate(train_loader):
+                print(f"Epoch {epoch} | Batch {i}")
+                train_batch(
+                    model,
+                    batch,
+                    opt=opt,
+                    scheduler=scheduler,
+                    N_supervision=args.N_supervision,
+                    n=args.n,
+                    T=args.T,
+                    halt_prob_thresh=args.halt_prob_thresh,
+                    device=device,
+                )
+                ema.update()
+
+            acc = evaluate(
                 model,
-                batch,
-                opt=opt,
-                scheduler=scheduler,
-                N_supervision=args.N_supervision,
+                val_loader,
+                N_supervision=args.N_supervision_eval or args.N_supervision,
                 n=args.n,
                 T=args.T,
-                halt_prob_thresh=args.halt_prob_thresh,
                 device=device,
             )
-            ema.update()
 
-        acc = evaluate(
-            model,
-            val_loader,
-            N_supervision=args.N_supervision_eval or args.N_supervision,
-            n=args.n,
-            T=args.T,
-            device=device,
+            print(f"Epoch {epoch} | Val Accuracy: {acc:.4f}")
+
+    # eval only
+    acc = evaluate(
+        model,
+        test_loader,
+        N_supervision=args.N_supervision_eval or args.N_supervision,
+        n=args.n,
+        T=args.T,
+        device=device,
+    )
+    print(f"Eval Accuracy: {acc:.4f}")
+
+    if args.checkpoint_path:
+        os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "opt_state_dict": opt.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+            },
+            args.checkpoint_path,
         )
-
-        print(f"Epoch {epoch} | Val Accuracy: {acc:.4f}")
+        print(f"Checkpoint saved to {args.checkpoint_path}")
