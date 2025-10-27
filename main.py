@@ -80,12 +80,12 @@ class TRM(nn.Module):
 class SwiGLU(nn.Module):
     """SwiGLU(x, W1, W2, W3) = W2(SiLU(W1x) * W3x)"""
 
-    def __init__(self, d_model, factor=4, device=None, dtype=None):
+    def __init__(self, d_model, factor=4):
         super().__init__()
         d_ff = int(d_model * factor)
-        self.W1 = nn.Linear(d_model, d_ff, device=device, dtype=dtype)
-        self.W3 = nn.Linear(d_model, d_ff, device=device, dtype=dtype)
-        self.W2 = nn.Linear(d_ff, d_model, device=device, dtype=dtype)
+        self.W1 = nn.Linear(d_model, d_ff)
+        self.W3 = nn.Linear(d_model, d_ff)
+        self.W2 = nn.Linear(d_ff, d_model)
 
     def forward(self, x):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
@@ -102,10 +102,10 @@ def rms_norm(x, eps=1e-8):
 class Net(nn.Module):
     """MLP-Mixer style with post-norms"""
 
-    def __init__(self, seq_len, h_dim, factor=4, device=None, dtype=None):
+    def __init__(self, seq_len, h_dim, factor=4):
         super().__init__()
-        self.l_mixer = SwiGLU(seq_len, factor=factor, device=device, dtype=dtype)
-        self.d_mixer = SwiGLU(h_dim, factor=factor, device=device, dtype=dtype)
+        self.l_mixer = SwiGLU(seq_len, factor=factor)
+        self.d_mixer = SwiGLU(h_dim, factor=factor)
 
     def forward(self, y, z, x=None):
         h = (x + y + z) if x is not None else (y + z)
@@ -140,22 +140,6 @@ class Select(nn.Module):
         return x.select(self.dim, self.index)
 
 
-def paper_model_factory(
-    vocab_size, seq_len, h_dim, h_factor=4, device=None, dtype=None
-):
-    input_embedding = InputEmbedding(vocab_size, seq_len, h_dim)
-    net = Net(seq_len, h_dim, factor=h_factor, device=device, dtype=dtype)
-    output_head = nn.Linear(h_dim, vocab_size, device=device, dtype=dtype)
-    Q_head = nn.Sequential(
-        Rearrange("b l h -> b l h"),
-        Select(0, dim=1),
-        nn.Linear(h_dim, 1, device=device, dtype=dtype),
-    )
-    init_z = nn.Parameter(torch.randn(h_dim) * 1e-2)
-    init_y = nn.Parameter(torch.randn(h_dim) * 1e-2)
-    return TRM(net, output_head, Q_head, input_embedding, init_z, init_y)
-
-
 def train_batch(
     model, batch, opt, scheduler, N_supervision, n, T, halt_prob_thresh=0.5, device=None
 ):
@@ -166,8 +150,6 @@ def train_batch(
     for step in range(N_supervision):
         (y, z), y_hat, q_hat, loss = model(x_input, y, z, y_true, n=n, T=T)
 
-        print(loss.item())
-
         loss.backward()
         opt.step()
         opt.zero_grad()
@@ -176,6 +158,8 @@ def train_batch(
         if q_hat.sigmoid().gt(halt_prob_thresh).all():
             print("halted")
             break
+
+    print(loss.item())
 
 
 @torch.no_grad()
@@ -188,6 +172,20 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
         total += y_true.numel()
         correct += (y_hats_logits[-1].argmax(-1) == y_true).sum().item()
     return correct / total
+
+
+def paper_model_factory(
+    vocab_size, seq_len, h_dim, h_factor=4, device=None, dtype=None
+):
+    input_embedding = InputEmbedding(vocab_size, seq_len, h_dim)
+    net = Net(seq_len, h_dim, factor=h_factor)
+    output_head = nn.Linear(h_dim, vocab_size)
+    Q_head = nn.Sequential(
+        Rearrange("b l h -> b l h"), Select(0, dim=1), nn.Linear(h_dim, 1)
+    )
+    init_z = nn.Parameter(torch.randn(h_dim) * 1e-2)
+    init_y = nn.Parameter(torch.randn(h_dim) * 1e-2)
+    return TRM(net, output_head, Q_head, input_embedding, init_z, init_y)
 
 
 if __name__ == "__main__":
@@ -220,8 +218,6 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         h_dim=args.h_dim,
         h_factor=4,
-        device=device,
-        dtype=dtype,
     ).to(device)
     ema = EMA(model, beta=args.ema_beta)
 
