@@ -10,6 +10,7 @@ Note: python is fixed to 3.12 because `datasets` issue I had with 3.14.
 
 --- 
 TODO:
+- fix EMA eval and state
 - stablemax loss
 - accelerate
 - logging
