@@ -117,7 +117,7 @@ class Net(nn.Module):
         h = o + h
         h = rms_norm(h)
 
-        o = self.d_mixer(o)
+        o = self.d_mixer(h)
         return rms_norm(o + h)
 
 
