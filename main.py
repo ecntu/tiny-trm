@@ -62,7 +62,7 @@ class TRM(nn.Module):
 
     def forward(self, x_input, y, z, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
-        (y, z), y_hat, q_hat = model.deep_recursion(x, y, z, n=n, T=T)
+        (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
 
         loss = F.cross_entropy(
             rearrange(y_hat, "b l c -> (b l) c"), rearrange(y_true, "b l -> (b l)")
@@ -157,7 +157,7 @@ def paper_model_factory(
 
 
 def train_batch(
-    batch, opt, scheduler, N_supervision, n, T, halt_prob_thresh=0.5, device=None
+    model, batch, opt, scheduler, N_supervision, n, T, halt_prob_thresh=0.5, device=None
 ):
     model.train()
     x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
@@ -207,7 +207,6 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=1.0)
     parser.add_argument("--ema_beta", type=float, default=0.999)
     parser.add_argument("--epochs", type=int, default=60_000)
-    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
 
@@ -229,7 +228,7 @@ if __name__ == "__main__":
     print(model)
 
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
-    train_ds = load_dataset(ds_path, split="train").shuffle(seed=42)
+    train_ds = load_dataset(ds_path, split="train")
     train_ds.set_format(type="torch", columns=["inputs", "labels"])
 
     val_ds = load_dataset(ds_path, split="test[:1024]")
@@ -252,6 +251,7 @@ if __name__ == "__main__":
         for i, batch in enumerate(train_loader):
             print(f"Epoch {epoch} | Batch {i}")
             train_batch(
+                model,
                 batch,
                 opt=opt,
                 scheduler=scheduler,
