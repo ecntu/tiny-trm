@@ -37,7 +37,7 @@ class TRM(nn.Module):
 
     def latent_recursion(self, x, y, z, n=6):
         for i in range(n):  # latent reasoning
-            z = self.net(x, y, z)
+            z = self.net(y, z, x)
         y = self.net(y, z)  # refine output answer
         return y, z
 
@@ -144,12 +144,12 @@ def paper_model_factory(
     vocab_size, seq_len, h_dim, h_factor=4, device=None, dtype=None
 ):
     input_embedding = InputEmbedding(vocab_size, seq_len, h_dim)
-    net = Net(seq_len, h_dim, factor=h_factor)
-    output_head = nn.Linear(h_dim, vocab_size)
+    net = Net(seq_len, h_dim, factor=h_factor, device=device, dtype=dtype)
+    output_head = nn.Linear(h_dim, vocab_size, device=device, dtype=dtype)
     Q_head = nn.Sequential(
         Rearrange("b l h -> b l h"),
         Select(0, dim=1),
-        nn.Linear(h_dim, 1),
+        nn.Linear(h_dim, 1, device=device, dtype=dtype),
     )
     init_z = nn.Parameter(torch.randn(h_dim) * 1e-2)
     init_y = nn.Parameter(torch.randn(h_dim) * 1e-2)
