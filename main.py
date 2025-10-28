@@ -6,6 +6,7 @@
 #     "datasets",
 #     "ema-pytorch",
 #     "tqdm",
+#     "wandb",
 # ]
 # ///
 
@@ -186,8 +187,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
+    parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
+    parser.add_argument("--log_wandb", action="store_true")
 
     args = parser.parse_args()
 
@@ -249,6 +252,16 @@ if __name__ == "__main__":
             opt, start_factor=0.1, total_iters=args.lr_warmup_iters
         )
 
+        if args.log_wandb:
+            import wandb
+
+            wandb.init(
+                project="trm-sudoku",
+                config=vars(args),
+                settings=wandb.Settings(code_dir="."),
+            )
+            wandb.watch(model, log="all")
+
         def cycle(loader):
             while True:
                 for batch in loader:
@@ -272,13 +285,13 @@ if __name__ == "__main__":
             ema.update()
 
             print(
-                f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f} +/- {halt_probs.std().item():.3f}"
+                f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f}"
             )
 
             if step >= n_steps:
                 break
 
-            if step % 10 == 0:
+            if step % args.val_every == 0:
                 acc = evaluate(
                     ema,
                     val_loader,
@@ -287,9 +300,19 @@ if __name__ == "__main__":
                     T=args.T,
                     device=device,
                 )
-                print(
-                    f"Step {step}/{len(train_loader)} (Epoch {step // len(train_loader)}) | Val Accuracy: {acc:.4f}"
-                )
+                if args.log_wandb:
+                    wandb.log(
+                        {
+                            "train/step": step,
+                            "train/epoch": step // len(train_loader),
+                            "train/loss": float(loss),
+                            "train/halt_prob_mean": float(halt_probs.mean().item()),
+                            "train/halt_prob_std": float(halt_probs.std().item()),
+                            "train/batch_steps": int(batch_steps),
+                            "train/lr": float(opt.param_groups[0]["lr"]),
+                            "val/accuracy": float(acc),
+                        }
+                    )
 
         ema.copy_params_from_ema_to_model()
 
@@ -307,3 +330,5 @@ if __name__ == "__main__":
         device=device,
     )
     print(f"Eval Accuracy: {acc:.4f}")
+    if args.log_wandb:
+        wandb.log({"test/accuracy": float(acc)})
