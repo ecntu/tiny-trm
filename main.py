@@ -57,8 +57,8 @@ class TRM(nn.Module):
     def predict(self, x_input, N_supervision=16, n=6, T=3):
         y_hats = []
         z, y = self.init_z, self.init_y
+        x = self.input_embedding(x_input)
         for step in range(N_supervision):
-            x = self.input_embedding(x_input)
             (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
             y_hats.append(y_hat)
         return rearrange(y_hats, "n b l c -> n b l c")
@@ -158,11 +158,12 @@ def train_batch(
         opt.zero_grad()
         scheduler.step()
 
-        if q_hat.sigmoid().gt(halt_prob_thresh).all():
+        halt_probs = q_hat.sigmoid()
+        if halt_probs.gt(halt_prob_thresh).all():
             print("halted")
             break
 
-    print(loss.item())
+    return loss.detach().item(), halt_probs.detach(), step + 1
 
 
 @torch.no_grad()
@@ -227,7 +228,12 @@ if __name__ == "__main__":
     ).to(device)
 
     model = torch.compile(model)
-    ema = EMA(model, beta=args.ema_beta)
+    ema = EMA(
+        model,
+        beta=args.ema_beta,
+        update_after_step=50,  # TODO make this an arg
+        forward_method_names=("predict",),
+    )
 
     print(model)
 
@@ -268,8 +274,7 @@ if __name__ == "__main__":
         steps = 0
         for epoch in range(args.epochs):
             for i, batch in enumerate(train_loader):
-                print(f"Epoch {epoch} | Batch {i} | Loss:", end=" ")
-                train_batch(
+                loss, halt_probs, batch_steps = train_batch(
                     model,
                     batch,
                     opt=opt,
@@ -283,20 +288,25 @@ if __name__ == "__main__":
                 ema.update()
                 steps += 1
 
+                print(
+                    f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f} +/- {halt_probs.std().item():.3f}"
+                )
+
                 if steps % 50 == 0:
                     acc = evaluate(
-                        model,
+                        ema,
                         val_loader,
                         N_supervision=args.N_supervision_eval or args.N_supervision,
                         n=args.n,
                         T=args.T,
                         device=device,
                     )
-                    print(f"Step {steps} (Epoch {epoch}) | Val Accuracy: {acc:.4f}")
+                    print(
+                        f"Step {steps}/{len(train_loader)} (Epoch {epoch}) | Val Accuracy: {acc:.4f}"
+                    )
 
-    # eval only
     acc = evaluate(
-        model,
+        ema,
         test_loader,
         N_supervision=args.N_supervision_eval or args.N_supervision,
         n=args.n,
