@@ -265,9 +265,10 @@ if __name__ == "__main__":
 
     if not args.eval_only:
         # train loop
+        steps = 0
         for epoch in range(args.epochs):
             for i, batch in enumerate(train_loader):
-                print(f"Epoch {epoch} | Batch {i}")
+                print(f"Epoch {epoch} | Batch {i} | Loss:", end=" ")
                 train_batch(
                     model,
                     batch,
@@ -280,17 +281,18 @@ if __name__ == "__main__":
                     device=device,
                 )
                 ema.update()
+                steps += 1
 
-            acc = evaluate(
-                model,
-                val_loader,
-                N_supervision=args.N_supervision_eval or args.N_supervision,
-                n=args.n,
-                T=args.T,
-                device=device,
-            )
-
-            print(f"Epoch {epoch} | Val Accuracy: {acc:.4f}")
+                if steps % 50 == 0:
+                    acc = evaluate(
+                        model,
+                        val_loader,
+                        N_supervision=args.N_supervision_eval or args.N_supervision,
+                        n=args.n,
+                        T=args.T,
+                        device=device,
+                    )
+                    print(f"Step {steps} (Epoch {epoch}) | Val Accuracy: {acc:.4f}")
 
     # eval only
     acc = evaluate(
