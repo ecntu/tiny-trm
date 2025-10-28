@@ -151,15 +151,19 @@ def train_batch(
     return loss.detach().item(), halt_probs.detach(), step + 1
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
     model.eval()
     total, correct = 0, 0
-    for batch in tqdm(data_loader, desc="Evaluating"):
-        x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
-        y_hats_logits = model.predict(x_input, N_supervision=N_supervision, n=n, T=T)
-        total += y_true.numel()
-        correct += (y_hats_logits[-1].argmax(-1) == y_true).sum().item()
+    with tqdm(data_loader, desc="Evaluating", leave=True) as pbar:
+        for batch in pbar:
+            x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
+            y_hats_logits = model.predict(
+                x_input, N_supervision=N_supervision, n=n, T=T
+            )
+            total += y_true.numel()
+            correct += (y_hats_logits[-1].argmax(-1) == y_true).sum().item()
+            pbar.set_postfix({"acc": correct / total})
     return correct / total
 
 
@@ -253,7 +257,7 @@ if __name__ == "__main__":
         n_steps = args.steps or (args.epochs * len(train_loader))
 
         # train loop
-        for step, batch in enumerate(cycle(train_loader)):
+        for step, batch in enumerate(cycle(train_loader), 1):
             loss, halt_probs, batch_steps = train_batch(
                 model,
                 batch,
