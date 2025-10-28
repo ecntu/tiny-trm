@@ -12,6 +12,7 @@
 # A single-file implementation of the Tiny Recursive Model (TRM) trained on Sudoku.
 # Paper: https://arxiv.org/abs/2305.10445
 
+from functools import partial
 import os
 import argparse
 import torch
@@ -21,7 +22,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from einops import rearrange
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Reduce
 
 from ema_pytorch import EMA
 from datasets import load_dataset
@@ -94,14 +95,6 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
-def rms_norm(x, eps=1e-8):
-    dtype = x.dtype  # TODO will x ever not be float32?
-    x = x.to(torch.float32)
-    var = x.square().mean(-1, keepdim=True)
-    x = x * torch.rsqrt(var + eps)
-    return x.to(dtype)
-
-
 class Net(nn.Module):
     """MLP-Mixer style with post-norms"""
 
@@ -109,6 +102,8 @@ class Net(nn.Module):
         super().__init__()
         self.l_mixer = SwiGLU(seq_len, factor=factor)
         self.d_mixer = SwiGLU(h_dim, factor=factor)
+        self.l_norm = nn.LayerNorm(h_dim)
+        self.d_norm = nn.LayerNorm(h_dim)
 
     def forward(self, y, z, x=None):
         h = (x + y + z) if x is not None else (y + z)
@@ -118,10 +113,10 @@ class Net(nn.Module):
 
         o = rearrange(o, "b d l -> b l d")
         h = o + h
-        h = rms_norm(h)
+        h = self.l_norm(h)
 
         o = self.d_mixer(h)
-        return rms_norm(o + h)
+        return self.d_norm(o + h)
 
 
 class InputEmbedding(nn.Module):
@@ -132,15 +127,6 @@ class InputEmbedding(nn.Module):
 
     def forward(self, x_input):
         return self.vocab_emb(x_input) + self.pos_emb.weight
-
-
-class Select(nn.Module):
-    def __init__(self, index: int, dim: int):
-        super().__init__()
-        self.dim, self.index = dim, index
-
-    def forward(self, x):
-        return x.select(self.dim, self.index)
 
 
 def train_batch(
@@ -160,7 +146,6 @@ def train_batch(
 
         halt_probs = q_hat.sigmoid()
         if halt_probs.gt(halt_prob_thresh).all():
-            print("halted")
             break
 
     return loss.detach().item(), halt_probs.detach(), step + 1
@@ -176,20 +161,6 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
         total += y_true.numel()
         correct += (y_hats_logits[-1].argmax(-1) == y_true).sum().item()
     return correct / total
-
-
-def paper_model_factory(
-    vocab_size, seq_len, h_dim, h_factor=4, device=None, dtype=None
-):
-    input_embedding = InputEmbedding(vocab_size, seq_len, h_dim)
-    net = Net(seq_len, h_dim, factor=h_factor)
-    output_head = nn.Linear(h_dim, vocab_size)
-    Q_head = nn.Sequential(
-        Rearrange("b l h -> b l h"), Select(0, dim=1), nn.Linear(h_dim, 1)
-    )
-    init_z = nn.Parameter(torch.randn(h_dim) * 1e-2)
-    init_y = nn.Parameter(torch.randn(h_dim) * 1e-2)
-    return TRM(net, output_head, Q_head, input_embedding, init_z, init_y)
 
 
 if __name__ == "__main__":
@@ -209,6 +180,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=1.0)
     parser.add_argument("--ema_beta", type=float, default=0.999)
     parser.add_argument("--epochs", type=int, default=60_000)
+    parser.add_argument("--steps", type=int, default=None)
 
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
@@ -220,12 +192,17 @@ if __name__ == "__main__":
 
     print("Using device:", device)
 
-    model = paper_model_factory(
-        vocab_size=args.vocab_len,
-        seq_len=args.seq_len,
-        h_dim=args.h_dim,
-        h_factor=4,
-    ).to(device)
+    model = TRM(
+        net=Net(seq_len=args.seq_len, h_dim=args.h_dim, factor=4),
+        output_head=nn.Linear(args.h_dim, args.vocab_len),
+        Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
+        input_embedding=InputEmbedding(
+            vocab_len=args.vocab_len, seq_len=args.seq_len, h_dim=args.h_dim
+        ),
+        # TODO make std arg
+        init_z=nn.Parameter(torch.randn(args.h_dim) * 1e-2),
+        init_y=nn.Parameter(torch.randn(args.h_dim) * 1e-2),
+    ).to(device=device, dtype=dtype)
 
     model = torch.compile(model)
     ema = EMA(
@@ -235,22 +212,22 @@ if __name__ == "__main__":
         forward_method_names=("predict",),
     )
 
-    print(model)
-
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
-
     train_ds = load_dataset(ds_path, split="train")
-    train_ds.set_format(type="torch", columns=["inputs", "labels"])
-
     val_ds = load_dataset(ds_path, split="test[:1024]")
-    val_ds.set_format(type="torch", columns=["inputs", "labels"])
-
     test_ds = load_dataset(ds_path, split="test")
-    test_ds.set_format(type="torch", columns=["inputs", "labels"])
+    for ds in (train_ds, val_ds, test_ds):
+        ds.set_format(type="torch", columns=["inputs", "labels"])
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    get_loader = partial(
+        DataLoader,
+        batch_size=args.batch_size,
+        drop_last=True,
+        pin_memory=device.type == "cuda",
+    )
+    train_loader = get_loader(train_ds, shuffle=True)
+    val_loader = get_loader(val_ds, shuffle=False)
+    test_loader = get_loader(test_ds, shuffle=False)
 
     opt = optim.AdamW(
         model.parameters(),
@@ -286,13 +263,12 @@ if __name__ == "__main__":
                     device=device,
                 )
                 ema.update()
-                steps += 1
 
                 print(
                     f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f} +/- {halt_probs.std().item():.3f}"
                 )
 
-                if steps % 50 == 0:
+                if steps % 10 == 0:
                     acc = evaluate(
                         ema,
                         val_loader,
@@ -304,6 +280,10 @@ if __name__ == "__main__":
                     print(
                         f"Step {steps}/{len(train_loader)} (Epoch {epoch}) | Val Accuracy: {acc:.4f}"
                     )
+
+                steps += 1
+                if args.steps is not None and steps >= args.steps:
+                    exit(0)
 
     acc = evaluate(
         ema,
