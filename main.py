@@ -229,64 +229,73 @@ if __name__ == "__main__":
     val_loader = get_loader(val_ds, shuffle=False)
     test_loader = get_loader(test_ds, shuffle=False)
 
-    opt = optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(0.9, 0.95),
-        weight_decay=args.weight_decay,
-    )
-    scheduler = optim.lr_scheduler.LinearLR(
-        opt, start_factor=0.1, total_iters=args.lr_warmup_iters
-    )
-
+    # Note: checkpoints are not really meant for cont. training here, just for eval-only runs.
     if args.checkpoint_path and os.path.exists(args.checkpoint_path):
-        checkpoint = torch.load(args.checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        opt.load_state_dict(checkpoint["opt_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        model.load_state_dict(torch.load(args.checkpoint_path))
         print(f"Loaded checkpoint from {args.checkpoint_path}")
 
     if not args.eval_only:
+        opt = optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(0.9, 0.95),
+            weight_decay=args.weight_decay,
+        )
+        scheduler = optim.lr_scheduler.LinearLR(
+            opt, start_factor=0.1, total_iters=args.lr_warmup_iters
+        )
+
+        def cycle(loader):
+            while True:
+                for batch in loader:
+                    yield batch
+
+        n_steps = args.steps or (args.epochs * len(train_loader))
+
         # train loop
-        steps = 0
-        for epoch in range(args.epochs):
-            for i, batch in enumerate(train_loader):
-                loss, halt_probs, batch_steps = train_batch(
-                    model,
-                    batch,
-                    opt=opt,
-                    scheduler=scheduler,
-                    N_supervision=args.N_supervision,
+        for step, batch in enumerate(cycle(train_loader)):
+            loss, halt_probs, batch_steps = train_batch(
+                model,
+                batch,
+                opt=opt,
+                scheduler=scheduler,
+                N_supervision=args.N_supervision,
+                n=args.n,
+                T=args.T,
+                halt_prob_thresh=args.halt_prob_thresh,
+                device=device,
+            )
+            ema.update()
+
+            print(
+                f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f} +/- {halt_probs.std().item():.3f}"
+            )
+
+            if step >= n_steps:
+                break
+
+            if step % 10 == 0:
+                acc = evaluate(
+                    ema,
+                    val_loader,
+                    N_supervision=args.N_supervision_eval or args.N_supervision,
                     n=args.n,
                     T=args.T,
-                    halt_prob_thresh=args.halt_prob_thresh,
                     device=device,
                 )
-                ema.update()
-
                 print(
-                    f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f} +/- {halt_probs.std().item():.3f}"
+                    f"Step {step}/{len(train_loader)} (Epoch {step // len(train_loader)}) | Val Accuracy: {acc:.4f}"
                 )
 
-                if steps % 10 == 0:
-                    acc = evaluate(
-                        ema,
-                        val_loader,
-                        N_supervision=args.N_supervision_eval or args.N_supervision,
-                        n=args.n,
-                        T=args.T,
-                        device=device,
-                    )
-                    print(
-                        f"Step {steps}/{len(train_loader)} (Epoch {epoch}) | Val Accuracy: {acc:.4f}"
-                    )
+        ema.copy_params_from_ema_to_model()
 
-                steps += 1
-                if args.steps is not None and steps >= args.steps:
-                    exit(0)
+        if args.checkpoint_path:
+            os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
+            torch.save(model.state_dict(), args.checkpoint_path)
+            print(f"Checkpoint saved to {args.checkpoint_path}")
 
     acc = evaluate(
-        ema,
+        model,
         test_loader,
         N_supervision=args.N_supervision_eval or args.N_supervision,
         n=args.n,
@@ -294,15 +303,3 @@ if __name__ == "__main__":
         device=device,
     )
     print(f"Eval Accuracy: {acc:.4f}")
-
-    if args.checkpoint_path:
-        os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
-        torch.save(
-            {
-                "model_state_dict": model.state_dict(),
-                "opt_state_dict": opt.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-            },
-            args.checkpoint_path,
-        )
-        print(f"Checkpoint saved to {args.checkpoint_path}")
