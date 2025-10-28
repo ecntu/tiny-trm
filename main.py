@@ -169,9 +169,9 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vocab_len", type=int, default=10)
-    parser.add_argument("--seq_len", type=int, default=81)
     parser.add_argument("--h_dim", type=int, default=512)
+    parser.add_argument("--yz_init_std", type=float, default=1e-2)
+
     parser.add_argument("--N_supervision", type=int, default=16)
     parser.add_argument("--N_supervision_eval", type=int, default=None)
     parser.add_argument("--n", type=int, default=6)
@@ -196,23 +196,23 @@ if __name__ == "__main__":
 
     print("Using device:", device)
 
+    vocab_len, seq_len = 10, 81
+
     model = TRM(
-        net=Net(seq_len=args.seq_len, h_dim=args.h_dim, factor=4),
-        output_head=nn.Linear(args.h_dim, args.vocab_len),
+        net=Net(seq_len=seq_len, h_dim=args.h_dim, factor=4),
+        output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
         input_embedding=InputEmbedding(
-            vocab_len=args.vocab_len, seq_len=args.seq_len, h_dim=args.h_dim
+            vocab_len=vocab_len, seq_len=seq_len, h_dim=args.h_dim
         ),
-        # TODO make std arg
-        init_z=nn.Parameter(torch.randn(args.h_dim) * 1e-2),
-        init_y=nn.Parameter(torch.randn(args.h_dim) * 1e-2),
+        init_z=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
+        init_y=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
     ).to(device=device, dtype=dtype)
 
     model = torch.compile(model)
     ema = EMA(
         model,
         beta=args.ema_beta,
-        update_after_step=50,  # TODO make this an arg
         forward_method_names=("predict",),
     )
 
