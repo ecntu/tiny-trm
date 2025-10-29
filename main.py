@@ -71,7 +71,7 @@ class TRM(nn.Module):
 
         loss = F.cross_entropy(
             rearrange(y_hat, "b l c -> (b l) c"), rearrange(y_true, "b l -> (b l)")
-        )  # TODO why does the paper reduce 'b ... -> b' with mean and then sum over b?
+        )
         loss += F.binary_cross_entropy_with_logits(
             q_hat,
             (y_hat.argmax(dim=-1) == y_true)
@@ -96,7 +96,7 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
-class Net(nn.Module):
+class MixerBlock(nn.Module):
     """MLP-Mixer style with post-norms"""
 
     def __init__(self, seq_len, h_dim, factor=4):
@@ -106,9 +106,7 @@ class Net(nn.Module):
         self.l_norm = nn.LayerNorm(h_dim)
         self.d_norm = nn.LayerNorm(h_dim)
 
-    def forward(self, y, z, x=None):
-        h = (x + y + z) if x is not None else (y + z)
-
+    def forward(self, h):
         o = rearrange(h, "b l d -> b d l")
         o = self.l_mixer(o)
 
@@ -120,14 +118,21 @@ class Net(nn.Module):
         return self.d_norm(o + h)
 
 
-class InputEmbedding(nn.Module):
-    def __init__(self, vocab_len, seq_len, h_dim):
+class Net(nn.Module):
+    def __init__(self, seq_len, h_dim, n_layers=2, factor=4):
         super().__init__()
-        self.vocab_emb = nn.Embedding(vocab_len, h_dim)
-        self.pos_emb = nn.Embedding(seq_len, h_dim)
+        self.blocks = nn.ModuleList(
+            [
+                MixerBlock(seq_len=seq_len, h_dim=h_dim, factor=factor)
+                for _ in range(n_layers)
+            ]
+        )
 
-    def forward(self, x_input):
-        return self.vocab_emb(x_input) + self.pos_emb.weight
+    def forward(self, y, z, x=None):
+        h = (x + y + z) if x is not None else (y + z)
+        for block in self.blocks:
+            h = block(h)
+        return h
 
 
 def train_batch(
@@ -170,7 +175,9 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--h_dim", type=int, default=512)
+    parser.add_argument("--mlp_factor", type=int, default=4)
     parser.add_argument("--yz_init_std", type=float, default=1e-2)
 
     parser.add_argument("--N_supervision", type=int, default=16)
@@ -187,6 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
+    parser.add_argument("--num_aug", type=int, default=100, choices=[10, 100, 1000])
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
@@ -202,15 +210,21 @@ if __name__ == "__main__":
     vocab_len, seq_len = 10, 81
 
     model = TRM(
-        net=Net(seq_len=seq_len, h_dim=args.h_dim, factor=4),
+        net=Net(
+            seq_len=seq_len,
+            h_dim=args.h_dim,
+            n_layers=args.n_layers,
+            factor=args.mlp_factor,
+        ),
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
-        input_embedding=InputEmbedding(
-            vocab_len=vocab_len, seq_len=seq_len, h_dim=args.h_dim
-        ),
+        input_embedding=nn.Embedding(vocab_len, args.h_dim),
         init_z=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
         init_y=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
     ).to(device=device, dtype=dtype)
+
+    print(model)
+    print("No. of model parameters:", sum(p.numel() for p in model.parameters()))
 
     model = torch.compile(model)
     ema = EMA(
@@ -219,7 +233,7 @@ if __name__ == "__main__":
         forward_method_names=("predict",),
     )
 
-    ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
+    ds_path = f"emiliocantuc/sudoku-extreme-1k-aug-{args.num_aug}"
     train_ds = load_dataset(ds_path, split="train")
     val_ds = load_dataset(ds_path, split="test[:1024]")
     test_ds = load_dataset(ds_path, split="test")
