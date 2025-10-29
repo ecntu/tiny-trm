@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
-    parser.add_argument("--num_aug", type=int, default=100, choices=[10, 100, 1000])
+    parser.add_argument("--num_aug", type=int, default=1000, choices=[10, 100, 1000])
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
