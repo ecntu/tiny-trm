@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
 
 from einops import rearrange
 from einops.layers.torch import Reduce
@@ -136,7 +137,16 @@ class Net(nn.Module):
 
 
 def train_batch(
-    model, batch, opt, scheduler, N_supervision, n, T, halt_prob_thresh=0.5, device=None
+    model,
+    batch,
+    opt,
+    scheduler,
+    N_supervision,
+    n,
+    T,
+    halt_prob_thresh=0.5,
+    max_grad_norm=1.0,
+    device=None,
 ):
     model.train()
     x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
@@ -146,6 +156,7 @@ def train_batch(
         (y, z), y_hat, q_hat, loss = model(x_input, y, z, y_true, n=n, T=T)
 
         loss.backward()
+        clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
         opt.step()
         opt.zero_grad()
         scheduler.step()
@@ -154,7 +165,7 @@ def train_batch(
         if halt_probs.gt(halt_prob_thresh).all():
             break
 
-    return loss.detach().item(), halt_probs.detach(), step + 1
+    return loss.detach().item(), y.detach(), z.detach(), halt_probs.detach(), step + 1
 
 
 @torch.inference_mode()
@@ -174,12 +185,25 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
     return solved / total
 
 
+def token_corr(h, eps=1e-8):
+    # To guard against representation collapse
+    b, l, d = h.shape
+
+    x = h - h.mean(dim=2, keepdim=True)
+    x = x / x.var(dim=2, unbiased=False, keepdim=True).sqrt().clamp_min(eps)
+
+    corr = x @ x.transpose(1, 2) / d  # (b, l, l)
+    eye = torch.eye(l, device=h.device, dtype=h.dtype).unsqueeze(0)  # (1, l, l)
+    offdiag_sum = (corr * (1 - eye)).sum(dim=(1, 2)) / (l * l - l)  # (b,)
+    return offdiag_sum.mean()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--h_dim", type=int, default=512)
     parser.add_argument("--mlp_factor", type=int, default=4)
-    parser.add_argument("--yz_init_std", type=float, default=1e-2)
+    parser.add_argument("--yz_init_std", type=float, default=1e-3)
 
     parser.add_argument("--N_supervision", type=int, default=16)
     parser.add_argument("--N_supervision_eval", type=int, default=None)
@@ -219,8 +243,8 @@ if __name__ == "__main__":
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
-        init_y=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
-        init_z=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
+        init_y=nn.Buffer(torch.randn(args.h_dim) * args.yz_init_std),
+        init_z=nn.Buffer(torch.randn(args.h_dim) * args.yz_init_std),
     ).to(device=device, dtype=dtype)
 
     print(model)
@@ -285,7 +309,7 @@ if __name__ == "__main__":
 
         # train loop
         for step, batch in enumerate(cycle(train_loader), 1):
-            loss, halt_probs, batch_steps = train_batch(
+            loss, y, z, halt_probs, batch_steps = train_batch(
                 model,
                 batch,
                 opt=opt,
@@ -320,6 +344,8 @@ if __name__ == "__main__":
                             "train/step": step,
                             "train/epoch": step // len(train_loader),
                             "train/loss": float(loss),
+                            "train/token_corr_y": float(token_corr(y)),
+                            "train/token_corr_z": float(token_corr(z)),
                             "train/halt_prob_mean": float(halt_probs.mean().item()),
                             "train/halt_prob_std": float(halt_probs.std().item()),
                             "train/batch_steps": int(batch_steps),
