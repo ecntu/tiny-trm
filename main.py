@@ -171,7 +171,8 @@ def train_batch(
 @torch.inference_mode()
 def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
     model.eval()
-    total, solved = 0, 0
+    total_cells, correct = 0, 0
+    total_puzzles, solved = 0, 0
     with tqdm(data_loader, desc="Evaluating", leave=True) as pbar:
         for batch in pbar:
             x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
@@ -179,10 +180,15 @@ def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
                 x_input, N_supervision=N_supervision, n=n, T=T
             )
             pred_cells = y_hats_logits[-1].argmax(-1)  # use only the last sup step
+
+            correct += (pred_cells == y_true).sum().item()
             solved += (pred_cells == y_true).all(dim=-1).sum().item()
-            total += y_true.shape[0]
-            pbar.set_postfix({"acc": solved / total})
-    return solved / total
+            total_cells += y_true.numel()
+            total_puzzles += y_true.shape[0]
+            pbar.set_postfix(
+                {"sol": solved / total_puzzles, "acc": correct / total_cells}
+            )
+    return solved / total_puzzles, correct / total_cells
 
 
 def token_corr(h, eps=1e-8):
@@ -330,7 +336,7 @@ if __name__ == "__main__":
                 break
 
             if step % args.val_every == 0:
-                acc = evaluate(
+                acc, cell_acc = evaluate(
                     ema,
                     val_loader,
                     N_supervision=args.N_supervision_eval or args.N_supervision,
@@ -351,6 +357,7 @@ if __name__ == "__main__":
                             "train/batch_steps": int(batch_steps),
                             "train/lr": float(opt.param_groups[0]["lr"]),
                             "val/accuracy": float(acc),
+                            "val/cell_accuracy": float(cell_acc),
                         }
                     )
 
@@ -361,7 +368,7 @@ if __name__ == "__main__":
             torch.save(model.state_dict(), args.checkpoint_path)
             print(f"Checkpoint saved to {args.checkpoint_path}")
 
-    acc = evaluate(
+    acc, cell_acc = evaluate(
         model,
         test_loader,
         N_supervision=args.N_supervision_eval or args.N_supervision,
@@ -369,6 +376,6 @@ if __name__ == "__main__":
         T=args.T,
         device=device,
     )
-    print(f"Eval Accuracy: {acc:.4f}")
+    print(f"Eval Accuracy: {acc:.4f} | Cell Accuracy: {cell_acc:.4f}")
     if args.log_wandb:
-        wandb.log({"test/accuracy": float(acc)})
+        wandb.log({"test/accuracy": float(acc), "test/cell_accuracy": float(cell_acc)})
