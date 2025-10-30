@@ -160,17 +160,18 @@ def train_batch(
 @torch.inference_mode()
 def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
     model.eval()
-    total, correct = 0, 0
+    total, solved = 0, 0
     with tqdm(data_loader, desc="Evaluating", leave=True) as pbar:
         for batch in pbar:
             x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
             y_hats_logits = model.predict(
                 x_input, N_supervision=N_supervision, n=n, T=T
             )
-            total += y_true.numel()
-            correct += (y_hats_logits[-1].argmax(-1) == y_true).sum().item()
-            pbar.set_postfix({"acc": correct / total})
-    return correct / total
+            pred_cells = y_hats_logits[-1].argmax(-1)  # use only the last sup step
+            solved += (pred_cells == y_true).all(dim=-1).sum().item()
+            total += y_true.shape[0]
+            pbar.set_postfix({"acc": solved / total})
+    return solved / total
 
 
 if __name__ == "__main__":
@@ -194,7 +195,6 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
-    parser.add_argument("--num_aug", type=int, default=1000, choices=[10, 100, 1000])
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
@@ -233,7 +233,7 @@ if __name__ == "__main__":
         forward_method_names=("predict",),
     )
 
-    ds_path = f"emiliocantuc/sudoku-extreme-1k-aug-{args.num_aug}"
+    ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
     train_ds = load_dataset(ds_path, split="train")
     val_ds = load_dataset(ds_path, split="test[:1024]")
     test_ds = load_dataset(ds_path, split="test")
