@@ -31,14 +31,14 @@ from tqdm import tqdm
 
 
 class TRM(nn.Module):
-    def __init__(self, net, output_head, Q_head, input_embedding, init_z, init_y):
+    def __init__(self, net, output_head, Q_head, input_embedding, init_y, init_z):
         super().__init__()
         self.net = net
         self.output_head = output_head
         self.Q_head = Q_head
         self.input_embedding = input_embedding
-        self.init_z = init_z
         self.init_y = init_y
+        self.init_z = init_z
 
     def latent_recursion(self, x, y, z, n=6):
         for i in range(n):  # latent reasoning
@@ -58,7 +58,7 @@ class TRM(nn.Module):
     @torch.no_grad()
     def predict(self, x_input, N_supervision=16, n=6, T=3):
         y_hats = []
-        z, y = self.init_z, self.init_y
+        y, z = self.init_y, self.init_z
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
             (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
@@ -219,8 +219,8 @@ if __name__ == "__main__":
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
-        init_z=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
         init_y=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
+        init_z=nn.Parameter(torch.randn(args.h_dim) * args.yz_init_std),
     ).to(device=device, dtype=dtype)
 
     print(model)
