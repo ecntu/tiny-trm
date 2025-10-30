@@ -53,7 +53,7 @@ class TRM(nn.Module):
                 y, z = self.latent_recursion(x, y, z, n)
         # recursing once to improve y and z
         y, z = self.latent_recursion(x, y, z, n)
-        return (y.detach(), z.detach()), self.output_head(z), self.Q_head(z)
+        return (y.detach(), z.detach()), self.output_head(y), self.Q_head(y)
 
     @torch.no_grad()
     def predict(self, x_input, N_supervision=16, n=6, T=3):
