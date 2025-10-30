@@ -359,13 +359,12 @@ if __name__ == "__main__":
                             "val/cell_accuracy": float(cell_acc),
                         }
                     )
+                if args.checkpoint_path:
+                    os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
+                    torch.save(model.state_dict(), args.checkpoint_path)
+                    print(f"Checkpoint saved to {args.checkpoint_path}")
 
         ema.copy_params_from_ema_to_model()
-
-        if args.checkpoint_path:
-            os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
-            torch.save(model.state_dict(), args.checkpoint_path)
-            print(f"Checkpoint saved to {args.checkpoint_path}")
 
     acc, cell_acc = evaluate(
         model,
