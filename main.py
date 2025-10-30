@@ -89,17 +89,15 @@ class SwiGLU(nn.Module):
     def __init__(self, d_model, factor=4):
         super().__init__()
         d_ff = int(d_model * factor)
-        self.W1 = nn.Linear(d_model, d_ff)
-        self.W3 = nn.Linear(d_model, d_ff)
-        self.W2 = nn.Linear(d_ff, d_model)
+        self.W1 = nn.Linear(d_model, d_ff, bias=False)
+        self.W3 = nn.Linear(d_model, d_ff, bias=False)
+        self.W2 = nn.Linear(d_ff, d_model, bias=False)
 
     def forward(self, x):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
 class MixerBlock(nn.Module):
-    """MLP-Mixer style with post-norms"""
-
     def __init__(self, seq_len, h_dim, factor=4):
         super().__init__()
         self.l_mixer = SwiGLU(seq_len, factor=factor)
@@ -108,15 +106,16 @@ class MixerBlock(nn.Module):
         self.d_norm = nn.LayerNorm(h_dim)
 
     def forward(self, h):
-        o = rearrange(h, "b l d -> b d l")
+        o = self.l_norm(h)
+        o = rearrange(o, "b l d -> b d l")
         o = self.l_mixer(o)
-
         o = rearrange(o, "b d l -> b l d")
-        h = o + h
-        h = self.l_norm(h)
 
-        o = self.d_mixer(h)
-        return self.d_norm(o + h)
+        h = o + h
+
+        o = self.d_norm(h)
+        o = self.d_mixer(o)
+        return o + h
 
 
 class Net(nn.Module):
@@ -128,12 +127,13 @@ class Net(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+        self.out_norm = nn.LayerNorm(h_dim)
 
     def forward(self, y, z, x=None):
         h = (x + y + z) if x is not None else (y + z)
         for block in self.blocks:
             h = block(h)
-        return h
+        return self.out_norm(h)
 
 
 def train_batch(
@@ -209,7 +209,6 @@ if __name__ == "__main__":
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--h_dim", type=int, default=512)
     parser.add_argument("--mlp_factor", type=int, default=4)
-    parser.add_argument("--yz_init_std", type=float, default=1e-3)
 
     parser.add_argument("--N_supervision", type=int, default=16)
     parser.add_argument("--N_supervision_eval", type=int, default=None)
@@ -249,8 +248,8 @@ if __name__ == "__main__":
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
-        init_y=nn.Buffer(torch.randn(args.h_dim) * args.yz_init_std),
-        init_z=nn.Buffer(torch.randn(args.h_dim) * args.yz_init_std),
+        init_y=nn.Buffer(torch.randn(args.h_dim)),
+        init_z=nn.Buffer(torch.randn(args.h_dim)),
     ).to(device=device, dtype=dtype)
 
     print(model)
