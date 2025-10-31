@@ -33,7 +33,16 @@ from tqdm import tqdm
 
 
 class TRM(nn.Module):
-    def __init__(self, net, output_head, Q_head, input_embedding, init_y, init_z):
+    def __init__(
+        self,
+        net,
+        output_head,
+        Q_head,
+        input_embedding,
+        init_y,
+        init_z,
+        halt_loss_weight=0.5,
+    ):
         super().__init__()
         self.net = net
         self.output_head = output_head
@@ -41,6 +50,7 @@ class TRM(nn.Module):
         self.input_embedding = input_embedding
         self.init_y = init_y
         self.init_z = init_z
+        self.halt_loss_weight = halt_loss_weight
 
     def latent_recursion(self, x, y, z, n=6):
         for i in range(n):  # latent reasoning
@@ -76,11 +86,9 @@ class TRM(nn.Module):
         )
         halt_loss = F.binary_cross_entropy_with_logits(
             q_hat,
-            (y_hat.argmax(dim=-1) == y_true)
-            .all(dim=1, keepdim=True)
-            .float(),  # TODO try partial credit (mean)?
+            (y_hat.argmax(dim=-1) == y_true).float().mean(dim=-1, keepdim=True),
         )
-        loss = rec_loss + halt_loss
+        loss = rec_loss + self.halt_loss_weight * halt_loss
 
         return (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss)
 
@@ -253,12 +261,13 @@ if __name__ == "__main__":
     parser.add_argument("--N_supervision_eval", type=int, default=None)
     parser.add_argument("--n", type=int, default=6)
     parser.add_argument("--T", type=int, default=3)
-    parser.add_argument("--halt_prob_thresh", type=float, default=0.5)
+    parser.add_argument("--halt_loss_weight", type=float, default=0.5)
+    parser.add_argument("--halt_prob_thresh", type=float, default=0.95)
 
     parser.add_argument("--batch_size", type=int, default=768)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1)
     parser.add_argument("--lr_warmup_iters", type=int, default=2000)
-    parser.add_argument("--weight_decay", type=float, default=1.0)
+    parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--ema_beta", type=float, default=0.999)
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
@@ -276,6 +285,9 @@ if __name__ == "__main__":
     device = accelerator.device
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
 
+    lr = args.lr / (args.batch_size * args.N_supervision)
+    accelerator.print(f"Effective learning rate: {lr}")
+
     model = TRM(
         net=Net(
             seq_len=seq_len,
@@ -288,6 +300,7 @@ if __name__ == "__main__":
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
         init_y=nn.Buffer(torch.randn(args.h_dim)),
         init_z=nn.Buffer(torch.randn(args.h_dim)),
+        halt_loss_weight=args.halt_loss_weight,
     )
 
     model = torch.compile(model)
@@ -313,7 +326,7 @@ if __name__ == "__main__":
         drop_last=True,
         pin_memory=device.type == "cuda",
         num_workers=4 if (device.type == "cuda") else 0,
-        persistent_workers=True,
+        persistent_workers=device.type == "cuda",
     )
     train_loader = get_loader(train_ds, shuffle=True)
     val_loader = get_loader(val_ds, shuffle=False)
@@ -343,14 +356,16 @@ if __name__ == "__main__":
         if not accelerator.is_main_process:
             return
         if "train/loss" in data:
-            accelerator.print(f"step {step} | loss: {data['train/loss']:.4f}")
+            accelerator.print(
+                f"step {step} | loss: {data['train/loss']:.4f} | batch steps: {data['train/batch_steps']}"
+            )
         if args.log_wandb:
             wandb.log(data, step=step)
 
     if not args.eval_only:
         opt = optim.AdamW(
             model.parameters(),
-            lr=args.lr,
+            lr=lr,
             betas=(0.9, 0.95),
             weight_decay=args.weight_decay,
         )
