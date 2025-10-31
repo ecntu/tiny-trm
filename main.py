@@ -1,5 +1,5 @@
 # /// script
-# requires-python = "==3.12"
+# requires-python = ">=3.12"
 # dependencies = [
 #     "einops",
 #     "torch",
@@ -7,27 +7,28 @@
 #     "ema-pytorch",
 #     "tqdm",
 #     "wandb",
+#     "accelerate",
 # ]
 # ///
 
 # A single-file implementation of the Tiny Recursive Model (TRM) trained on Sudoku.
 # Paper: https://arxiv.org/abs/2305.10445
-
-from functools import partial
-import os
-import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.nn.utils import clip_grad_norm_
 
 from einops import rearrange
 from einops.layers.torch import Reduce
 
+from accelerate import Accelerator
 from ema_pytorch import EMA
 from datasets import load_dataset
+
+import os
+import argparse
+from functools import partial
 from tqdm import tqdm
 
 
@@ -138,6 +139,7 @@ class Net(nn.Module):
 
 
 def train_batch(
+    accelerator,
     model,
     batch,
     opt,
@@ -148,21 +150,21 @@ def train_batch(
     T,
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
-    device=None,
 ):
     model.train()
-    x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
+    x_input, y_true = batch["inputs"], batch["labels"]
     z, y = model.init_z, model.init_y
 
     for step in range(N_supervision):
-        (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
-            x_input, y, z, y_true, n=n, T=T
-        )
+        with accelerator.autocast():
+            (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
+                x_input, y, z, y_true, n=n, T=T
+            )
 
-        loss.backward()
-        clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        accelerator.backward(loss)
+        accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
         opt.step()
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         scheduler.step()
 
         halt_probs = q_hat.sigmoid()
@@ -185,23 +187,38 @@ def train_batch(
 
 
 @torch.inference_mode()
-def evaluate(model, data_loader, N_supervision=16, n=6, T=3, device=None):
+def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3):
     model.eval()
     total_cells, correct = 0, 0
     total_puzzles, solved = 0, 0
-    with tqdm(data_loader, desc="Evaluating", leave=True) as pbar:
-        for batch in pbar:
-            x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
+
+    it = (
+        tqdm(data_loader, desc="Evaluating")
+        if accelerator.is_main_process
+        else data_loader
+    )
+
+    for batch in it:
+        x_input, y_true = batch["inputs"], batch["labels"]
+
+        with accelerator.autocast():
             y_hats_logits = model.predict(
                 x_input, N_supervision=N_supervision, n=n, T=T
             )
-            pred_cells = y_hats_logits[-1].argmax(-1)  # use only the last sup step
 
-            correct += (pred_cells == y_true).sum().item()
-            solved += (pred_cells == y_true).all(dim=-1).sum().item()
-            total_cells += y_true.numel()
-            total_puzzles += y_true.shape[0]
-            pbar.set_postfix(
+        pred_cells = y_hats_logits[-1].argmax(-1)  # use only the last sup step
+
+        # gather across processes for global metrics
+        pred_cells = accelerator.gather_for_metrics(pred_cells)
+        y_true = accelerator.gather_for_metrics(y_true)
+
+        correct += (pred_cells == y_true).sum().item()
+        solved += (pred_cells == y_true).all(dim=-1).sum().item()
+        total_cells += y_true.numel()
+        total_puzzles += y_true.shape[0]
+
+        if accelerator.is_main_process:
+            it.set_postfix(
                 {"sol": solved / total_puzzles, "acc": correct / total_cells}
             )
     return solved / total_puzzles, correct / total_cells
@@ -253,12 +270,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.float32
-
-    print("Using device:", device)
-
     vocab_len, seq_len = 10, 81
+
+    accelerator = Accelerator()
+    device = accelerator.device
+    accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
 
     model = TRM(
         net=Net(
@@ -272,17 +288,17 @@ if __name__ == "__main__":
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
         init_y=nn.Buffer(torch.randn(args.h_dim)),
         init_z=nn.Buffer(torch.randn(args.h_dim)),
-    ).to(device=device, dtype=dtype)
-
-    print(model)
-    print("No. of model parameters:", sum(p.numel() for p in model.parameters()))
+    )
 
     model = torch.compile(model)
-    ema = EMA(
-        model,
-        beta=args.ema_beta,
-        forward_method_names=("predict",),
-    )
+
+    # Note: checkpoints are not really meant for cont. training here, just for eval-only runs.
+    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
+        model.load_state_dict(torch.load(args.checkpoint_path))
+        accelerator.print(f"Loaded checkpoint from {args.checkpoint_path}")
+
+    accelerator.print(model)
+    accelerator.print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
     train_ds = load_dataset(ds_path, split="train")
@@ -296,15 +312,22 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         drop_last=True,
         pin_memory=device.type == "cuda",
+        num_workers=4 if (device.type == "cuda") else 0,
+        persistent_workers=True,
     )
     train_loader = get_loader(train_ds, shuffle=True)
     val_loader = get_loader(val_ds, shuffle=False)
     test_loader = get_loader(test_ds, shuffle=False)
 
-    # Note: checkpoints are not really meant for cont. training here, just for eval-only runs.
-    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
-        model.load_state_dict(torch.load(args.checkpoint_path))
-        print(f"Loaded checkpoint from {args.checkpoint_path}")
+    model, train_loader, val_loader, test_loader = accelerator.prepare(
+        model, train_loader, val_loader, test_loader
+    )
+
+    ema = EMA(
+        accelerator.unwrap_model(model),
+        beta=args.ema_beta,
+        forward_method_names=("predict",),
+    ).to(device)
 
     if args.log_wandb:
         import wandb
@@ -314,11 +337,13 @@ if __name__ == "__main__":
             config=vars(args),
             settings=wandb.Settings(code_dir="."),
         )
-        wandb.watch(model, log="all")
+        wandb.watch(model, log="all", log_freq=10)
 
     def logger(data, step=None):
+        if not accelerator.is_main_process:
+            return
         if "train/loss" in data:
-            print(f"step {step} | loss: {data['train/loss']:.4f}")
+            accelerator.print(f"step {step} | loss: {data['train/loss']:.4f}")
         if args.log_wandb:
             wandb.log(data, step=step)
 
@@ -333,12 +358,13 @@ if __name__ == "__main__":
             opt, start_factor=0.1, total_iters=args.lr_warmup_iters
         )
 
+        opt, scheduler = accelerator.prepare(opt, scheduler)
+
         n_steps = args.steps or (args.epochs * len(train_loader))
         best_acc = 0.0
-
-        # train loop
         for step, batch in enumerate(cycle(train_loader), start=1):
             train_batch(
+                accelerator=accelerator,
                 model=model,
                 batch=batch,
                 opt=opt,
@@ -348,8 +374,8 @@ if __name__ == "__main__":
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
-                device=device,
             )
+
             ema.update()
 
             if step >= n_steps:
@@ -357,12 +383,12 @@ if __name__ == "__main__":
 
             if step % args.val_every == 0:
                 solve_rate, cell_acc = evaluate(
+                    accelerator,
                     ema,
                     val_loader,
                     N_supervision=args.N_supervision_eval or args.N_supervision,
                     n=args.n,
                     T=args.T,
-                    device=device,
                 )
                 logger(
                     {
@@ -372,21 +398,25 @@ if __name__ == "__main__":
                     step=step,
                 )
 
-                if args.checkpoint_path and cell_acc > best_acc:
+                if (
+                    accelerator.is_main_process
+                    and args.checkpoint_path
+                    and cell_acc > best_acc
+                ):
                     os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
-                    torch.save(ema.ema_model.state_dict(), args.checkpoint_path)
-                    print(f"Checkpoint saved to {args.checkpoint_path}")
+                    accelerator.save(ema.ema_model.state_dict(), args.checkpoint_path)
+                    accelerator.print(f"Checkpoint saved to {args.checkpoint_path}")
                     best_acc = cell_acc
 
         ema.copy_params_from_ema_to_model()
 
     solve_rate, cell_acc = evaluate(
+        accelerator,
         model,
         test_loader,
         N_supervision=args.N_supervision_eval or args.N_supervision,
         n=args.n,
         T=args.T,
-        device=device,
     )
     logger(
         {"test/solve_rate": float(solve_rate), "test/cell_accuracy": float(cell_acc)}
