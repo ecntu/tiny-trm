@@ -142,12 +142,12 @@ def train_batch(
     batch,
     opt,
     scheduler,
+    logger,
     N_supervision,
     n,
     T,
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
-    logger=None,
     device=None,
 ):
     model.train()
@@ -169,20 +169,19 @@ def train_batch(
         if halt_probs.gt(halt_prob_thresh).all():
             break
 
-    if logger is not None:
-        logger(
-            {
-                "train/loss": loss.detach().item(),
-                "train/rec_loss": rec_loss.detach().item(),
-                "train/halt_loss": halt_loss.detach().item(),
-                "train/halt_prob_mean": halt_probs.mean().item(),
-                "train/halt_prob_std": halt_probs.std().item(),
-                "train/batch_steps": step + 1,
-                "train/lr": opt.param_groups[0]["lr"],
-                "train/token_corr_y": float(token_corr(y)),
-                "train/token_corr_z": float(token_corr(z)),
-            }
-        )
+    logger(
+        {
+            "train/loss": loss.detach().item(),
+            "train/rec_loss": rec_loss.detach().item(),
+            "train/halt_loss": halt_loss.detach().item(),
+            "train/halt_prob_mean": halt_probs.mean().item(),
+            "train/halt_prob_std": halt_probs.std().item(),
+            "train/batch_steps": step + 1,
+            "train/lr": opt.param_groups[0]["lr"],
+            "train/token_corr_y": float(token_corr(y)),
+            "train/token_corr_z": float(token_corr(z)),
+        }
+    )
 
 
 @torch.inference_mode()
@@ -249,7 +248,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
-    parser.add_argument("--checkpoint_path", type=str, default="./tmp.pt")
+    parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--log_wandb", action="store_true")
 
     args = parser.parse_args()
@@ -278,7 +277,7 @@ if __name__ == "__main__":
     print(model)
     print("No. of model parameters:", sum(p.numel() for p in model.parameters()))
 
-    # model = torch.compile(model)
+    model = torch.compile(model)
     ema = EMA(
         model,
         beta=args.ema_beta,
@@ -335,6 +334,7 @@ if __name__ == "__main__":
         )
 
         n_steps = args.steps or (args.epochs * len(train_loader))
+        best_acc = 0.0
 
         # train loop
         for step, batch in enumerate(cycle(train_loader), start=1):
@@ -343,11 +343,11 @@ if __name__ == "__main__":
                 batch=batch,
                 opt=opt,
                 scheduler=scheduler,
+                logger=partial(logger, step=step),
                 N_supervision=args.N_supervision,
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
-                logger=partial(logger, step=step),
                 device=device,
             )
             ema.update()
@@ -356,7 +356,7 @@ if __name__ == "__main__":
                 break
 
             if step % args.val_every == 0:
-                acc, cell_acc = evaluate(
+                solve_rate, cell_acc = evaluate(
                     ema,
                     val_loader,
                     N_supervision=args.N_supervision_eval or args.N_supervision,
@@ -365,17 +365,22 @@ if __name__ == "__main__":
                     device=device,
                 )
                 logger(
-                    {"val/accuracy": float(acc), "val/cell_accuracy": float(cell_acc)},
+                    {
+                        "val/solve_rate": float(solve_rate),
+                        "val/cell_accuracy": float(cell_acc),
+                    },
                     step=step,
                 )
-                if args.checkpoint_path:
+
+                if args.checkpoint_path and cell_acc > best_acc:
                     os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
-                    torch.save(model.state_dict(), args.checkpoint_path)
+                    torch.save(ema.ema_model.state_dict(), args.checkpoint_path)
                     print(f"Checkpoint saved to {args.checkpoint_path}")
+                    best_acc = cell_acc
 
         ema.copy_params_from_ema_to_model()
 
-    acc, cell_acc = evaluate(
+    solve_rate, cell_acc = evaluate(
         model,
         test_loader,
         N_supervision=args.N_supervision_eval or args.N_supervision,
@@ -383,5 +388,6 @@ if __name__ == "__main__":
         T=args.T,
         device=device,
     )
-    print(f"Eval Accuracy: {acc:.4f} | Cell Accuracy: {cell_acc:.4f}")
-    logger({"test/accuracy": float(acc), "test/cell_accuracy": float(cell_acc)})
+    logger(
+        {"test/solve_rate": float(solve_rate), "test/cell_accuracy": float(cell_acc)}
+    )
