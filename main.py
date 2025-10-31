@@ -70,17 +70,18 @@ class TRM(nn.Module):
         x = self.input_embedding(x_input)
         (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
 
-        loss = F.cross_entropy(
+        rec_loss = F.cross_entropy(
             rearrange(y_hat, "b l c -> (b l) c"), rearrange(y_true, "b l -> (b l)")
         )
-        loss += F.binary_cross_entropy_with_logits(
+        halt_loss = F.binary_cross_entropy_with_logits(
             q_hat,
             (y_hat.argmax(dim=-1) == y_true)
             .all(dim=1, keepdim=True)
             .float(),  # TODO try partial credit (mean)?
         )
+        loss = rec_loss + halt_loss
 
-        return (y, z), y_hat, q_hat, loss
+        return (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss)
 
 
 class SwiGLU(nn.Module):
@@ -146,6 +147,7 @@ def train_batch(
     T,
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
+    logger=None,
     device=None,
 ):
     model.train()
@@ -153,7 +155,9 @@ def train_batch(
     z, y = model.init_z, model.init_y
 
     for step in range(N_supervision):
-        (y, z), y_hat, q_hat, loss = model(x_input, y, z, y_true, n=n, T=T)
+        (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
+            x_input, y, z, y_true, n=n, T=T
+        )
 
         loss.backward()
         clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
@@ -165,7 +169,20 @@ def train_batch(
         if halt_probs.gt(halt_prob_thresh).all():
             break
 
-    return loss.detach().item(), y.detach(), z.detach(), halt_probs.detach(), step + 1
+    if logger is not None:
+        logger(
+            {
+                "train/loss": loss.detach().item(),
+                "train/rec_loss": rec_loss.detach().item(),
+                "train/halt_loss": halt_loss.detach().item(),
+                "train/halt_prob_mean": halt_probs.mean().item(),
+                "train/halt_prob_std": halt_probs.std().item(),
+                "train/batch_steps": step + 1,
+                "train/lr": opt.param_groups[0]["lr"],
+                "train/token_corr_y": float(token_corr(y)),
+                "train/token_corr_z": float(token_corr(z)),
+            }
+        )
 
 
 @torch.inference_mode()
@@ -202,6 +219,12 @@ def token_corr(h, eps=1e-8):
     eye = torch.eye(l, device=h.device, dtype=h.dtype).unsqueeze(0)  # (1, l, l)
     offdiag_sum = (corr * (1 - eye)).sum(dim=(1, 2)) / (l * l - l)  # (b,)
     return offdiag_sum.mean()
+
+
+def cycle(loader):
+    while True:
+        for batch in loader:
+            yield batch
 
 
 if __name__ == "__main__":
@@ -255,7 +278,7 @@ if __name__ == "__main__":
     print(model)
     print("No. of model parameters:", sum(p.numel() for p in model.parameters()))
 
-    model = torch.compile(model)
+    # model = torch.compile(model)
     ema = EMA(
         model,
         beta=args.ema_beta,
@@ -284,6 +307,22 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.checkpoint_path))
         print(f"Loaded checkpoint from {args.checkpoint_path}")
 
+    if args.log_wandb:
+        import wandb
+
+        wandb.init(
+            project="trm-sudoku",
+            config=vars(args),
+            settings=wandb.Settings(code_dir="."),
+        )
+        wandb.watch(model, log="all")
+
+    def logger(data, step=None):
+        if "train/loss" in data:
+            print(f"step {step} | loss: {data['train/loss']:.4f}")
+        if args.log_wandb:
+            wandb.log(data, step=step)
+
     if not args.eval_only:
         opt = optim.AdamW(
             model.parameters(),
@@ -295,41 +334,23 @@ if __name__ == "__main__":
             opt, start_factor=0.1, total_iters=args.lr_warmup_iters
         )
 
-        if args.log_wandb:
-            import wandb
-
-            wandb.init(
-                project="trm-sudoku",
-                config=vars(args),
-                settings=wandb.Settings(code_dir="."),
-            )
-            wandb.watch(model, log="all")
-
-        def cycle(loader):
-            while True:
-                for batch in loader:
-                    yield batch
-
         n_steps = args.steps or (args.epochs * len(train_loader))
 
         # train loop
-        for step, batch in enumerate(cycle(train_loader), 1):
-            loss, y, z, halt_probs, batch_steps = train_batch(
-                model,
-                batch,
+        for step, batch in enumerate(cycle(train_loader), start=1):
+            train_batch(
+                model=model,
+                batch=batch,
                 opt=opt,
                 scheduler=scheduler,
                 N_supervision=args.N_supervision,
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
+                logger=partial(logger, step=step),
                 device=device,
             )
             ema.update()
-
-            print(
-                f"Loss: {loss:.3f} | Steps: {batch_steps} | Halt Probs: {halt_probs.mean().item():.3f}"
-            )
 
             if step >= n_steps:
                 break
@@ -343,22 +364,10 @@ if __name__ == "__main__":
                     T=args.T,
                     device=device,
                 )
-                if args.log_wandb:
-                    wandb.log(
-                        {
-                            "train/step": step,
-                            "train/epoch": step // len(train_loader),
-                            "train/loss": float(loss),
-                            "train/token_corr_y": float(token_corr(y)),
-                            "train/token_corr_z": float(token_corr(z)),
-                            "train/halt_prob_mean": float(halt_probs.mean().item()),
-                            "train/halt_prob_std": float(halt_probs.std().item()),
-                            "train/batch_steps": int(batch_steps),
-                            "train/lr": float(opt.param_groups[0]["lr"]),
-                            "val/accuracy": float(acc),
-                            "val/cell_accuracy": float(cell_acc),
-                        }
-                    )
+                logger(
+                    {"val/accuracy": float(acc), "val/cell_accuracy": float(cell_acc)},
+                    step=step,
+                )
                 if args.checkpoint_path:
                     os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
                     torch.save(model.state_dict(), args.checkpoint_path)
@@ -375,5 +384,4 @@ if __name__ == "__main__":
         device=device,
     )
     print(f"Eval Accuracy: {acc:.4f} | Cell Accuracy: {cell_acc:.4f}")
-    if args.log_wandb:
-        wandb.log({"test/accuracy": float(acc), "test/cell_accuracy": float(cell_acc)})
+    logger({"test/accuracy": float(acc), "test/cell_accuracy": float(cell_acc)})
