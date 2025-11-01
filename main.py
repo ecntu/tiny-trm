@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = "==3.12"
 # dependencies = [
 #     "einops",
 #     "torch",
@@ -70,7 +70,7 @@ class TRM(nn.Module):
     @torch.no_grad()
     def predict(self, x_input, N_supervision=16, n=6, T=3):
         y_hats = []
-        y, z = self.init_y, self.init_z
+        y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
             (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
@@ -146,6 +146,18 @@ class Net(nn.Module):
         return self.out_norm(h)
 
 
+class InitState(nn.Module):
+    def __init__(self, h_dim, mode, device):
+        super().__init__()
+
+        self.get_state = partial(torch.randn, h_dim, device=device)
+        self.state = nn.Buffer(self.get_state()) if mode == "buffer" else None
+        self.mode = mode
+
+    def forward(self):
+        return self.state if self.mode == "buffer" else self.get_state()
+
+
 def train_batch(
     accelerator,
     model,
@@ -161,7 +173,7 @@ def train_batch(
 ):
     model.train()
     x_input, y_true = batch["inputs"], batch["labels"]
-    z, y = model.init_z, model.init_y
+    z, y = model.init_z(), model.init_y()
 
     for step in range(N_supervision):
         with accelerator.autocast():
@@ -190,6 +202,7 @@ def train_batch(
             "train/lr": opt.param_groups[0]["lr"],
             "train/token_corr_y": float(token_corr(y)),
             "train/token_corr_z": float(token_corr(z)),
+            "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
         }
     )
 
@@ -256,6 +269,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--h_dim", type=int, default=512)
     parser.add_argument("--mlp_factor", type=int, default=4)
+    parser.add_argument(
+        "--init_state", type=str, default="buffer", choices=["buffer", "random"]
+    )
 
     parser.add_argument("--N_supervision", type=int, default=16)
     parser.add_argument("--N_supervision_eval", type=int, default=None)
@@ -285,9 +301,6 @@ if __name__ == "__main__":
     device = accelerator.device
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
 
-    lr = args.lr / (args.batch_size * args.N_supervision)
-    accelerator.print(f"Effective learning rate: {lr}")
-
     model = TRM(
         net=Net(
             seq_len=seq_len,
@@ -298,8 +311,8 @@ if __name__ == "__main__":
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
         input_embedding=nn.Embedding(vocab_len, args.h_dim),
-        init_y=nn.Buffer(torch.randn(args.h_dim)),
-        init_z=nn.Buffer(torch.randn(args.h_dim)),
+        init_y=InitState(args.h_dim, mode=args.init_state, device=device),
+        init_z=InitState(args.h_dim, mode=args.init_state, device=device),
         halt_loss_weight=args.halt_loss_weight,
     )
 
@@ -365,7 +378,7 @@ if __name__ == "__main__":
     if not args.eval_only:
         opt = optim.AdamW(
             model.parameters(),
-            lr=lr,
+            lr=args.lr / (args.batch_size * args.N_supervision),
             betas=(0.9, 0.95),
             weight_decay=args.weight_decay,
         )
@@ -406,10 +419,7 @@ if __name__ == "__main__":
                     T=args.T,
                 )
                 logger(
-                    {
-                        "val/solve_rate": float(solve_rate),
-                        "val/cell_accuracy": float(cell_acc),
-                    },
+                    {"val/solve_rate": solve_rate, "val/cell_accuracy": cell_acc},
                     step=step,
                 )
 
@@ -433,6 +443,4 @@ if __name__ == "__main__":
         n=args.n,
         T=args.T,
     )
-    logger(
-        {"test/solve_rate": float(solve_rate), "test/cell_accuracy": float(cell_acc)}
-    )
+    logger({"test/solve_rate": solve_rate, "test/cell_accuracy": cell_acc})
