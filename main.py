@@ -96,22 +96,21 @@ class TRM(nn.Module):
 class SwiGLU(nn.Module):
     """SwiGLU(x, W1, W2, W3) = W2(SiLU(W1x) * W3x)"""
 
-    def __init__(self, d_model, factor=4):
+    def __init__(self, d_model, d_inter):
         super().__init__()
-        d_ff = int(d_model * factor)
-        self.W1 = nn.Linear(d_model, d_ff, bias=False)
-        self.W3 = nn.Linear(d_model, d_ff, bias=False)
-        self.W2 = nn.Linear(d_ff, d_model, bias=False)
+        self.W1 = nn.Linear(d_model, d_inter, bias=False)
+        self.W3 = nn.Linear(d_model, d_inter, bias=False)
+        self.W2 = nn.Linear(d_inter, d_model, bias=False)
 
     def forward(self, x):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
 class MixerBlock(nn.Module):
-    def __init__(self, seq_len, h_dim, factor=4):
+    def __init__(self, seq_len, h_dim, d_inter):
         super().__init__()
-        self.l_mixer = SwiGLU(seq_len, factor=factor)
-        self.d_mixer = SwiGLU(h_dim, factor=factor)
+        self.l_mixer = SwiGLU(seq_len, d_inter)
+        self.d_mixer = SwiGLU(h_dim, d_inter)
         self.l_norm = nn.LayerNorm(h_dim)
         self.d_norm = nn.LayerNorm(h_dim)
 
@@ -129,11 +128,11 @@ class MixerBlock(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, seq_len, h_dim, n_layers=2, factor=4):
+    def __init__(self, seq_len, h_dim, d_inter, n_layers=2):
         super().__init__()
         self.blocks = nn.ModuleList(
             [
-                MixerBlock(seq_len=seq_len, h_dim=h_dim, factor=factor)
+                MixerBlock(seq_len=seq_len, h_dim=h_dim, d_inter=d_inter)
                 for _ in range(n_layers)
             ]
         )
@@ -264,6 +263,10 @@ def cycle(loader):
             yield batch
 
 
+def _find_multiple(a, b):
+    return (-(a // -b)) * b
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_layers", type=int, default=2)
@@ -306,7 +309,7 @@ if __name__ == "__main__":
             seq_len=seq_len,
             h_dim=args.h_dim,
             n_layers=args.n_layers,
-            factor=args.mlp_factor,
+            d_inter=_find_multiple(round(args.mlp_factor * args.h_dim * 2 / 3), 256),
         ),
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
