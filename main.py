@@ -163,12 +163,12 @@ def train_batch(
     batch,
     opt,
     scheduler,
-    logger,
     N_supervision,
     n,
     T,
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
+    logger=None,
 ):
     model.train()
     x_input, y_true = batch["inputs"], batch["labels"]
@@ -190,20 +190,21 @@ def train_batch(
         if halt_probs.gt(halt_prob_thresh).all():
             break
 
-    logger(
-        {
-            "train/loss": loss.detach().item(),
-            "train/rec_loss": rec_loss.detach().item(),
-            "train/halt_loss": halt_loss.detach().item(),
-            "train/halt_prob_mean": halt_probs.mean().item(),
-            "train/halt_prob_std": halt_probs.std().item(),
-            "train/batch_steps": step + 1,
-            "train/lr": opt.param_groups[0]["lr"],
-            "train/token_corr_y": float(token_corr(y)),
-            "train/token_corr_z": float(token_corr(z)),
-            "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
-        }
-    )
+    if logger is not None:
+        logger(
+            {
+                "train/loss": loss.detach().item(),
+                "train/rec_loss": rec_loss.detach().item(),
+                "train/halt_loss": halt_loss.detach().item(),
+                "train/halt_prob_mean": halt_probs.mean().item(),
+                "train/halt_prob_std": halt_probs.std().item(),
+                "train/batch_steps": step + 1,
+                "train/lr": opt.param_groups[0]["lr"],
+                "train/token_corr_y": float(token_corr(y)),
+                "train/token_corr_z": float(token_corr(z)),
+                "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
+            }
+        )
 
 
 @torch.inference_mode()
@@ -400,11 +401,11 @@ if __name__ == "__main__":
                 batch=batch,
                 opt=opt,
                 scheduler=scheduler,
-                logger=partial(logger, step=step),
                 N_supervision=args.N_supervision,
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
+                logger=partial(logger, step=step) if step % 5 == 0 else None,
             )
 
             ema.update()
