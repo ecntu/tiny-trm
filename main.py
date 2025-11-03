@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("--halt_prob_thresh", type=float, default=0.95)
 
     parser.add_argument("--batch_size", type=int, default=768)
-    parser.add_argument("--lr", type=float, default=1)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_warmup_iters", type=int, default=2000)
     parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--ema_beta", type=float, default=0.999)
@@ -386,7 +386,7 @@ if __name__ == "__main__":
     if not args.eval_only:
         opt = optim.AdamW(
             model.parameters(),
-            lr=args.lr / (args.batch_size * args.N_supervision),
+            lr=args.lr,
             betas=(0.9, 0.95),
             weight_decay=args.weight_decay,
         )
@@ -452,3 +452,4 @@ if __name__ == "__main__":
         T=args.T,
     )
     logger({"test/solve_rate": solve_rate, "test/cell_accuracy": cell_acc})
+
