@@ -10,7 +10,7 @@ Works ok. A small model (1.5M) slightly surpasses HRM’s performance (56%) but 
 
 ```bash
 # disabled halting for testing
- uv run main.py --batch_size 128 --h_dim 256 --halt_loss_weight 0.0 --halt_prob_thresh 2.0
+ uv run main.py --batch_size 128 --h_dim 256 --N_supervision 8 --halt_loss_weight 0.0 --halt_prob_thresh 2.0
 ```
 
 <img width="541" height="256" alt="1-5M preelim perf" src="https://github.com/user-attachments/assets/a0b2249d-5fed-4b08-a045-e469277b7d2e" />
