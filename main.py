@@ -212,7 +212,7 @@ def train_batch(
 
 
 @torch.inference_mode()
-def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3):
+def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_passes=1):
     model.eval()
     total_cells, correct = 0, 0
     total_puzzles, solved = 0, 0
@@ -226,12 +226,18 @@ def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3):
     for batch in it:
         x_input, y_true = batch["inputs"], batch["labels"]
 
-        with accelerator.autocast():
-            y_hats_logits = model.predict(
-                x_input, N_supervision=N_supervision, n=n, T=T
-            )
+        pred_cells = []
+        for _ in range(k_passes):
+            with accelerator.autocast():
+                y_hats_logits = model.predict(
+                    x_input, N_supervision=N_supervision, n=n, T=T
+                )
 
-        pred_cells = y_hats_logits[-1].argmax(-1)  # use only the last sup step
+            pred_cells.append(
+                y_hats_logits[-1].argmax(-1)
+            )  # use only the last sup step
+
+        pred_cells = rearrange(pred_cells, "k b l -> k b l").mode(dim=0).values
 
         # gather across processes for global metrics
         pred_cells = accelerator.gather_for_metrics(pred_cells)
@@ -296,6 +302,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
+    parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--checkpoint_path", type=str, default=None)
@@ -450,6 +457,6 @@ if __name__ == "__main__":
         N_supervision=args.N_supervision_eval or args.N_supervision,
         n=args.n,
         T=args.T,
+        k_passes=args.k_passes,
     )
     logger({"test/solve_rate": solve_rate, "test/cell_accuracy": cell_acc})
-
