@@ -181,7 +181,7 @@ def train_batch(
     for step in range(N_supervision):
         with accelerator.autocast():
             (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
-                x_input, y, z, y_true, n=n, T=T
+                x_input, y, z, y_true, n=n, T=(1 if step == 0 else T)
             )
 
         accelerator.backward(loss)
@@ -230,7 +230,7 @@ def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_pass
         for _ in range(k_passes):
             with accelerator.autocast():
                 y_hats_logits = model.predict(
-                    x_input, N_supervision=N_supervision, n=n, T=T
+                    x_input, N_supervision=N_supervision, n=n, T=(1 if step == 0 else T)
                 )
 
             pred_cells.append(
