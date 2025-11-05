@@ -77,7 +77,9 @@ class TRM(nn.Module):
         y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
-            (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
+            (y, z), y_hat, _ = self.deep_recursion(
+                x, y, z, n=n, T=(1 if step == 0 else T)
+            )
             y_hats.append(y_hat)
         return rearrange(y_hats, "n b l c -> n b l c")
 
@@ -230,7 +232,7 @@ def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_pass
         for _ in range(k_passes):
             with accelerator.autocast():
                 y_hats_logits = model.predict(
-                    x_input, N_supervision=N_supervision, n=n, T=(1 if step == 0 else T)
+                    x_input, N_supervision=N_supervision, n=n, T=T
                 )
 
             pred_cells.append(
