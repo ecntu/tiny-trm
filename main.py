@@ -101,11 +101,16 @@ class TRM(nn.Module):
         return (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss)
 
 
+def _find_multiple(a, b):
+    return (-(a // -b)) * b
+
+
 class SwiGLU(nn.Module):
     """SwiGLU(x, W1, W2, W3) = W2(SiLU(W1x) * W3x)"""
 
-    def __init__(self, d_model, d_inter):
+    def __init__(self, d_model, expansion):
         super().__init__()
+        d_inter = _find_multiple(round(d_model * expansion * 2 / 3), 256)
         self.W1 = nn.Linear(d_model, d_inter, bias=False)
         self.W3 = nn.Linear(d_model, d_inter, bias=False)
         self.W2 = nn.Linear(d_inter, d_model, bias=False)
@@ -115,16 +120,16 @@ class SwiGLU(nn.Module):
 
 
 class FP32LayerNorm(nn.LayerNorm):
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
         orig_type = x.dtype
         return super().forward(x.float()).to(orig_type)
 
 
 class MixerBlock(nn.Module):
-    def __init__(self, seq_len, h_dim, d_inter):
+    def __init__(self, seq_len, h_dim, expansion):
         super().__init__()
-        self.l_mixer = SwiGLU(seq_len, d_inter)
-        self.d_mixer = SwiGLU(h_dim, d_inter)
+        self.l_mixer = SwiGLU(seq_len, expansion)
+        self.d_mixer = SwiGLU(h_dim, expansion)
         self.l_norm = FP32LayerNorm(h_dim)
         self.d_norm = FP32LayerNorm(h_dim)
 
@@ -142,11 +147,11 @@ class MixerBlock(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, seq_len, h_dim, d_inter, n_layers=2):
+    def __init__(self, seq_len, h_dim, expansion, n_layers=2):
         super().__init__()
         self.blocks = nn.ModuleList(
             [
-                MixerBlock(seq_len=seq_len, h_dim=h_dim, d_inter=d_inter)
+                MixerBlock(seq_len=seq_len, h_dim=h_dim, expansion=expansion)
                 for _ in range(n_layers)
             ]
         )
@@ -288,15 +293,12 @@ def cycle(loader):
 def model_factory(args, device):
     vocab_len, seq_len = 10, 81
 
-    def _find_multiple(a, b):
-        return (-(a // -b)) * b
-
     model = TRM(
         net=Net(
             seq_len=seq_len,
             h_dim=args.h_dim,
             n_layers=args.n_layers,
-            d_inter=_find_multiple(round(args.mlp_factor * args.h_dim * 2 / 3), 256),
+            expansion=args.mlp_factor,
         ),
         output_head=nn.Linear(args.h_dim, vocab_len),
         Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
@@ -306,7 +308,7 @@ def model_factory(args, device):
         halt_loss_weight=args.halt_loss_weight,
     )
 
-    model = torch.compile(model)
+    # model = torch.compile(model)
     return model
 
 
