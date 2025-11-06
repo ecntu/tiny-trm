@@ -89,10 +89,11 @@ class TRM(nn.Module):
         (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
 
         rec_loss = F.cross_entropy(
-            rearrange(y_hat, "b l c -> (b l) c"), rearrange(y_true, "b l -> (b l)")
+            rearrange(y_hat.float(), "b l c -> (b l) c"),
+            rearrange(y_true, "b l -> (b l)"),
         )
         halt_loss = F.binary_cross_entropy_with_logits(
-            q_hat,
+            q_hat.float(),
             (y_hat.argmax(dim=-1) == y_true).float().mean(dim=-1, keepdim=True),
         )
         loss = rec_loss + self.halt_loss_weight * halt_loss
@@ -113,13 +114,19 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
+class FP32LayerNorm(nn.LayerNorm):
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        return super().forward(x.float()).to(orig_type)
+
+
 class MixerBlock(nn.Module):
     def __init__(self, seq_len, h_dim, d_inter):
         super().__init__()
         self.l_mixer = SwiGLU(seq_len, d_inter)
         self.d_mixer = SwiGLU(h_dim, d_inter)
-        self.l_norm = nn.LayerNorm(h_dim)
-        self.d_norm = nn.LayerNorm(h_dim)
+        self.l_norm = FP32LayerNorm(h_dim)
+        self.d_norm = FP32LayerNorm(h_dim)
 
     def forward(self, h):
         o = self.l_norm(h)
@@ -143,7 +150,7 @@ class Net(nn.Module):
                 for _ in range(n_layers)
             ]
         )
-        self.out_norm = nn.LayerNorm(h_dim)
+        self.out_norm = FP32LayerNorm(h_dim)
 
     def forward(self, y, z, x=None):
         h = (x + y + z) if x is not None else (y + z)
@@ -260,6 +267,7 @@ def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_pass
 
 def token_corr(h, eps=1e-8):
     # To guard against representation collapse
+    h = h.detach().float()
     b, l, d = h.shape
 
     x = h - h.mean(dim=2, keepdim=True)
