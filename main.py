@@ -7,6 +7,7 @@
 #     "ema-pytorch",
 #     "tqdm",
 #     "accelerate",
+#     "wandb",
 # ]
 # ///
 
