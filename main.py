@@ -308,7 +308,7 @@ def model_factory(args, device):
         halt_loss_weight=args.halt_loss_weight,
     )
 
-    # model = torch.compile(model)
+    model = torch.compile(model)
     return model
 
 
@@ -329,9 +329,9 @@ if __name__ == "__main__":
     parser.add_argument("--halt_prob_thresh", type=float, default=0.95)
 
     parser.add_argument("--batch_size", type=int, default=768)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_warmup_iters", type=int, default=2000)
-    parser.add_argument("--weight_decay", type=float, default=1e-3)
+    parser.add_argument("--weight_decay", type=float, default=1.0)
     parser.add_argument("--ema_beta", type=float, default=0.999)
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
