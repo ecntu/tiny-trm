@@ -82,6 +82,9 @@ class TRM(nn.Module):
 
     def forward(self, x_input, y, z, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
+        if y is None:
+            y, z = self.init_y(), self.init_z()
+
         (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
 
         rec_loss = F.cross_entropy(
@@ -175,8 +178,8 @@ def train_batch(
 ):
     model.train()
     x_input, y_true = batch["inputs"], batch["labels"]
-    z, y = model.init_z(), model.init_y()
 
+    y, z = None, None
     for step in range(N_supervision):
         with accelerator.autocast():
             (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
@@ -340,6 +343,13 @@ if __name__ == "__main__":
     accelerator.print(model)
     accelerator.print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
+    ema = EMA(
+        model,
+        beta=args.ema_beta,
+        forward_method_names=("predict",),
+    ).to(device)  # TODO only on main?
+    accelerator.register_for_checkpointing(ema)
+
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
     train_ds = load_dataset(ds_path, split="train")
     val_ds = load_dataset(ds_path, split="test[:1024]")
@@ -362,13 +372,6 @@ if __name__ == "__main__":
     model, train_loader, val_loader, test_loader = accelerator.prepare(
         model, train_loader, val_loader, test_loader
     )
-
-    ema = EMA(
-        accelerator.unwrap_model(model),
-        beta=args.ema_beta,
-        forward_method_names=("predict",),
-    ).to(device)  # TODO only on main?
-    accelerator.register_for_checkpointing(ema)
 
     if "wandb" in accelerator.trackers and accelerator.is_main_process:
         accelerator.get_tracker("wandb", unwrap=True).watch(
