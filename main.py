@@ -6,7 +6,6 @@
 #     "datasets",
 #     "ema-pytorch",
 #     "tqdm",
-#     "wandb",
 #     "accelerate",
 # ]
 # ///
@@ -204,8 +203,8 @@ def train_batch(
                 "train/halt_prob_std": halt_probs.std().item(),
                 "train/batch_steps": step + 1,
                 "train/lr": opt.param_groups[0]["lr"],
-                "train/token_corr_y": float(token_corr(y)),
-                "train/token_corr_z": float(token_corr(z)),
+                "train/token_corr_y": float(token_corr(y.detach())),
+                "train/token_corr_z": float(token_corr(z.detach())),
                 "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
             }
         )
@@ -274,8 +273,29 @@ def cycle(loader):
             yield batch
 
 
-def _find_multiple(a, b):
-    return (-(a // -b)) * b
+def model_factory(args, device):
+    vocab_len, seq_len = 10, 81
+
+    def _find_multiple(a, b):
+        return (-(a // -b)) * b
+
+    model = TRM(
+        net=Net(
+            seq_len=seq_len,
+            h_dim=args.h_dim,
+            n_layers=args.n_layers,
+            d_inter=_find_multiple(round(args.mlp_factor * args.h_dim * 2 / 3), 256),
+        ),
+        output_head=nn.Linear(args.h_dim, vocab_len),
+        Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
+        input_embedding=nn.Embedding(vocab_len, args.h_dim),
+        init_y=InitState(args.h_dim, mode=args.init_state, device=device),
+        init_z=InitState(args.h_dim, mode=args.init_state, device=device),
+        halt_loss_weight=args.halt_loss_weight,
+    )
+
+    model = torch.compile(model)
+    return model
 
 
 if __name__ == "__main__":
@@ -305,39 +325,18 @@ if __name__ == "__main__":
     parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
-    parser.add_argument("--checkpoint_path", type=str, default=None)
-    parser.add_argument("--log_wandb", action="store_true")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--log_with", type=str, default=None)
 
     args = parser.parse_args()
 
-    vocab_len, seq_len = 10, 81
-
-    accelerator = Accelerator()
+    accelerator = Accelerator(log_with=args.log_with)
+    accelerator.init_trackers("trm-sudoku", config=vars(args))
     device = accelerator.device
+    gpu = device.type == "cuda"
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
 
-    model = TRM(
-        net=Net(
-            seq_len=seq_len,
-            h_dim=args.h_dim,
-            n_layers=args.n_layers,
-            d_inter=_find_multiple(round(args.mlp_factor * args.h_dim * 2 / 3), 256),
-        ),
-        output_head=nn.Linear(args.h_dim, vocab_len),
-        Q_head=nn.Sequential(Reduce("b l h -> b h", "mean"), nn.Linear(args.h_dim, 1)),
-        input_embedding=nn.Embedding(vocab_len, args.h_dim),
-        init_y=InitState(args.h_dim, mode=args.init_state, device=device),
-        init_z=InitState(args.h_dim, mode=args.init_state, device=device),
-        halt_loss_weight=args.halt_loss_weight,
-    )
-
-    model = torch.compile(model)
-
-    # Note: checkpoints are not really meant for cont. training here, just for eval-only runs.
-    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
-        model.load_state_dict(torch.load(args.checkpoint_path))
-        accelerator.print(f"Loaded checkpoint from {args.checkpoint_path}")
-
+    model = model_factory(args, device)
     accelerator.print(model)
     accelerator.print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
@@ -352,9 +351,9 @@ if __name__ == "__main__":
         DataLoader,
         batch_size=args.batch_size,
         drop_last=True,
-        pin_memory=device.type == "cuda",
-        num_workers=4 if (device.type == "cuda") else 0,
-        persistent_workers=device.type == "cuda",
+        pin_memory=gpu,
+        num_workers=4 if gpu else 0,
+        persistent_workers=gpu,
     )
     train_loader = get_loader(train_ds, shuffle=True)
     val_loader = get_loader(val_ds, shuffle=False)
@@ -368,27 +367,20 @@ if __name__ == "__main__":
         accelerator.unwrap_model(model),
         beta=args.ema_beta,
         forward_method_names=("predict",),
-    ).to(device)
+    ).to(device)  # TODO only on main?
+    accelerator.register_for_checkpointing(ema)
 
-    if args.log_wandb:
-        import wandb
-
-        wandb.init(
-            project="trm-sudoku",
-            config=vars(args),
-            settings=wandb.Settings(code_dir="."),
+    if "wandb" in accelerator.trackers and accelerator.is_main_process:
+        accelerator.get_tracker("wandb", unwrap=True).watch(
+            model, log="all", log_freq=10
         )
-        wandb.watch(model, log="all", log_freq=10)
 
-    def logger(data, step=None):
-        if not accelerator.is_main_process:
-            return
-        if "train/loss" in data:
+    def logger(data, step=None, print_every=1):
+        accelerator.log(data, step=step)
+        if step and step % print_every == 0 and "train/loss" in data:
             accelerator.print(
                 f"step {step} | loss: {data['train/loss']:.4f} | batch steps: {data['train/batch_steps']}"
             )
-        if args.log_wandb:
-            wandb.log(data, step=step)
 
     if not args.eval_only:
         opt = optim.AdamW(
@@ -396,12 +388,17 @@ if __name__ == "__main__":
             lr=args.lr,
             betas=(0.9, 0.95),
             weight_decay=args.weight_decay,
+            fused=gpu,
         )
         scheduler = optim.lr_scheduler.LinearLR(
             opt, start_factor=0.1, total_iters=args.lr_warmup_iters
         )
 
         opt, scheduler = accelerator.prepare(opt, scheduler)
+
+        if args.checkpoint and os.path.exists(args.checkpoint):
+            accelerator.load_state(args.checkpoint)
+            accelerator.print(f"Loaded checkpoint from {args.checkpoint} for training")
 
         n_steps = args.steps or (args.epochs * len(train_loader))
         best_acc = 0.0
@@ -416,7 +413,7 @@ if __name__ == "__main__":
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
-                logger=partial(logger, step=step) if step % 5 == 0 else None,
+                logger=partial(logger, step=step, print_every=10),
             )
 
             ema.update()
@@ -438,18 +435,16 @@ if __name__ == "__main__":
                     step=step,
                 )
 
-                if (
-                    accelerator.is_main_process
-                    and args.checkpoint_path
-                    and cell_acc > best_acc
-                ):
-                    os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
-                    accelerator.save(ema.ema_model.state_dict(), args.checkpoint_path)
-                    accelerator.print(f"Checkpoint saved to {args.checkpoint_path}")
+                if args.checkpoint and cell_acc > best_acc:
+                    accelerator.save_state(args.checkpoint)
+                    accelerator.print(f"Checkpoint saved to {args.checkpoint}")
                     best_acc = cell_acc
 
-        ema.copy_params_from_ema_to_model()
+    if args.checkpoint and os.path.exists(args.checkpoint):
+        accelerator.load_state(args.checkpoint)
+        accelerator.print(f"Loaded checkpoint from {args.checkpoint} for evaluation")
 
+    ema.copy_params_from_ema_to_model()  # always evaluate EMA model
     solve_rate, cell_acc = evaluate(
         accelerator,
         model,
@@ -460,3 +455,4 @@ if __name__ == "__main__":
         k_passes=args.k_passes,
     )
     logger({"test/solve_rate": solve_rate, "test/cell_accuracy": cell_acc})
+    accelerator.end_training()

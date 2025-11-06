@@ -1,6 +1,9 @@
 # Custom
 *.ipynb
 *.pt
+*.pkl
+*.safetensors
+*.bin
 wandb/
 
 # Byte-compiled / optimized / DLL files
