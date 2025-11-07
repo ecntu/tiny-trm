@@ -200,7 +200,8 @@ def train_batch(
             )
 
         accelerator.backward(loss)
-        accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+        grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+        last_grad_norm = float(grad_norm) if grad_norm is not None else 0.0
         opt.step()
         opt.zero_grad(set_to_none=True)
         scheduler.step()
@@ -222,6 +223,7 @@ def train_batch(
                 "train/token_corr_y": float(token_corr(y.detach())),
                 "train/token_corr_z": float(token_corr(z.detach())),
                 "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
+                "train/grad_norm": last_grad_norm,
             }
         )
 
@@ -354,13 +356,6 @@ if __name__ == "__main__":
     accelerator.print(model)
     accelerator.print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
-    ema = EMA(
-        model,
-        beta=args.ema_beta,
-        forward_method_names=("predict",),
-    ).to(device)  # TODO only on main?
-    accelerator.register_for_checkpointing(ema)
-
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
     train_ds = load_dataset(ds_path, split="train")
     val_ds = load_dataset(ds_path, split="test[:1024]")
@@ -384,6 +379,14 @@ if __name__ == "__main__":
         model, train_loader, val_loader, test_loader
     )
 
+    ema = EMA(
+        accelerator.unwrap_model(model),
+        beta=args.ema_beta,
+        forward_method_names=("predict",),
+        update_every=1,
+    ).to(device)  # TODO only on main?
+    accelerator.register_for_checkpointing(ema)
+
     if "wandb" in accelerator.trackers and accelerator.is_main_process:
         accelerator.get_tracker("wandb", unwrap=True).watch(
             model, log="all", log_freq=10
@@ -393,7 +396,7 @@ if __name__ == "__main__":
         accelerator.log(data, step=step)
         if step and step % print_every == 0 and "train/loss" in data:
             accelerator.print(
-                f"step {step} | loss: {data['train/loss']:.4f} | batch steps: {data['train/batch_steps']}"
+                f"step {step} | loss: {data['train/loss']:.4f} | g_norm: {data['train/grad_norm']:.4f}"
             )
 
     if not args.eval_only:
