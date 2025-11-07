@@ -210,22 +210,23 @@ def train_batch(
         if halt_probs.gt(halt_prob_thresh).all():
             break
 
-    if logger is not None:
-        logger(
-            {
-                "train/loss": loss.detach().item(),
-                "train/rec_loss": rec_loss.detach().item(),
-                "train/halt_loss": halt_loss.detach().item(),
-                "train/halt_prob_mean": halt_probs.mean().item(),
-                "train/halt_prob_std": halt_probs.std().item(),
-                "train/batch_steps": step + 1,
-                "train/lr": opt.param_groups[0]["lr"],
-                "train/token_corr_y": float(token_corr(y.detach())),
-                "train/token_corr_z": float(token_corr(z.detach())),
-                "train/logit_norm": float(y_hat.detach().norm(dim=-1).mean()),
-                "train/grad_norm": last_grad_norm,
-            }
-        )
+    if logger is not None and accelerator.is_main_process:
+        with torch.no_grad():
+            logger(
+                {
+                    "train/loss": loss,
+                    "train/rec_loss": rec_loss,
+                    "train/halt_loss": halt_loss,
+                    "train/halt_prob_mean": halt_probs.mean(),
+                    "train/halt_prob_std": halt_probs.std(),
+                    "train/batch_steps": step + 1,
+                    "train/lr": opt.param_groups[0]["lr"],
+                    "train/token_corr_y": float(token_corr(y)),
+                    "train/token_corr_z": float(token_corr(z)),
+                    "train/logit_norm": float(y_hat.norm(dim=-1).mean()),
+                    "train/grad_norm": last_grad_norm,
+                }
+            )
 
 
 @torch.inference_mode()
@@ -292,7 +293,7 @@ def cycle(loader):
             yield batch
 
 
-def model_factory(args, device):
+def model_factory(args, device, compile):
     vocab_len, seq_len = 10, 81
 
     model = TRM(
@@ -309,8 +310,8 @@ def model_factory(args, device):
         init_z=InitState(args.h_dim, mode=args.init_state, device=device),
         halt_loss_weight=args.halt_loss_weight,
     )
-
-    model = torch.compile(model)
+    if compile:
+        model = torch.compile(model)
     return model
 
 
@@ -338,6 +339,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000)
     parser.add_argument("--steps", type=int, default=None)
 
+    parser.add_argument("--no_compile", action="store_true")
     parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
@@ -352,7 +354,7 @@ if __name__ == "__main__":
     gpu = device.type == "cuda"
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
 
-    model = model_factory(args, device)
+    model = model_factory(args, device, not args.no_compile)
     accelerator.print(model)
     accelerator.print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
@@ -419,7 +421,12 @@ if __name__ == "__main__":
 
         n_steps = args.steps or (args.epochs * len(train_loader))
         best_acc = 0.0
-        for step, batch in enumerate(cycle(train_loader), start=1):
+        for step, batch in tqdm(
+            enumerate(cycle(train_loader), start=1),
+            total=n_steps,
+            disable=not accelerator.is_main_process,
+            desc="Training",
+        ):
             train_batch(
                 accelerator=accelerator,
                 model=model,
