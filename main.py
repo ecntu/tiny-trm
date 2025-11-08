@@ -349,7 +349,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     accelerator = Accelerator(log_with=args.log_with)
-    accelerator.init_trackers("trm-sudoku", config=vars(args))
+    accelerator.init_trackers(
+        "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
+    )
     device = accelerator.device
     gpu = device.type == "cuda"
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
