@@ -119,10 +119,12 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
-class FP32LayerNorm(nn.LayerNorm):
-    def forward(self, x):
-        orig_type = x.dtype
-        return super().forward(x.float()).to(orig_type)
+def rms_norm(x, eps=1e-5):
+    input_dtype = x.dtype
+    x = x.float()
+    variance = x.square().mean(-1, keepdim=True)
+    x = x * torch.rsqrt(variance + eps)
+    return x.to(input_dtype)
 
 
 class MixerBlock(nn.Module):
@@ -130,18 +132,16 @@ class MixerBlock(nn.Module):
         super().__init__()
         self.l_mixer = SwiGLU(seq_len, expansion)
         self.d_mixer = SwiGLU(h_dim, expansion)
-        self.l_norm = FP32LayerNorm(h_dim)
-        self.d_norm = FP32LayerNorm(h_dim)
 
     def forward(self, h):
-        o = self.l_norm(h)
+        o = rms_norm(h)
         o = rearrange(o, "b l d -> b d l")
         o = self.l_mixer(o)
         o = rearrange(o, "b d l -> b l d")
 
         h = o + h
 
-        o = self.d_norm(h)
+        o = rms_norm(h)
         o = self.d_mixer(o)
         return o + h
 
@@ -155,13 +155,12 @@ class Net(nn.Module):
                 for _ in range(n_layers)
             ]
         )
-        self.out_norm = FP32LayerNorm(h_dim)
 
     def forward(self, y, z, x=None):
         h = (x + y + z) if x is not None else (y + z)
         for block in self.blocks:
             h = block(h)
-        return self.out_norm(h)
+        return rms_norm(h)
 
 
 class InitState(nn.Module):
@@ -335,8 +334,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_warmup_iters", type=int, default=2000)
     parser.add_argument("--weight_decay", type=float, default=1.0)
-    parser.add_argument("--ema_beta", type=float, default=0.999)
-    parser.add_argument("--epochs", type=int, default=60_000)
+    parser.add_argument("--ema_beta", type=float, default=0.999**16)
+    parser.add_argument("--epochs", type=int, default=60_000 // 16)
     parser.add_argument("--steps", type=int, default=None)
 
     parser.add_argument("--no_compile", action="store_true")
@@ -367,13 +366,15 @@ if __name__ == "__main__":
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
 
+    workers = min(8, os.cpu_count() or 4)
     get_loader = partial(
         DataLoader,
         batch_size=args.batch_size,
         drop_last=True,
         pin_memory=gpu,
-        num_workers=4 if gpu else 0,
-        persistent_workers=gpu,
+        num_workers=workers if gpu else 0,
+        persistent_workers=workers > 0 and gpu,
+        prefetch_factor=4 if workers > 0 and gpu else None,
     )
     train_loader = get_loader(train_ds, shuffle=True)
     val_loader = get_loader(val_ds, shuffle=False)
