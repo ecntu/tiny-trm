@@ -342,6 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
     parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--skip_eval", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--log_with", type=str, default=None)
 
@@ -466,6 +467,10 @@ if __name__ == "__main__":
                     accelerator.save_state(args.checkpoint)
                     accelerator.print(f"Checkpoint saved to {args.checkpoint}")
                     best_acc = cell_acc
+
+    if args.skip_eval:
+        accelerator.end_training()
+        exit(0)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         accelerator.load_state(args.checkpoint)
