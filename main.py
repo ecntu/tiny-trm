@@ -193,6 +193,7 @@ def train_batch(
 
     y, z = None, None
     for step in range(N_supervision):
+        y_in, z_in = y, z  # store previous states
         with accelerator.autocast():
             (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
                 x_input, y, z, y_true, n=n, T=T
@@ -208,6 +209,10 @@ def train_batch(
         halt_probs = q_hat.sigmoid()
         if halt_probs.gt(halt_prob_thresh).all():
             break
+
+        # stay on policy
+        with accelerator.autocast():
+            (y, z), _, _, _, _ = model(x_input, y_in, z_in, y_true, n=n, T=T)
 
     if logger is not None and accelerator.is_main_process:
         with torch.no_grad():
