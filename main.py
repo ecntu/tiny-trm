@@ -203,11 +203,12 @@ def train_batch(
         last_grad_norm = float(grad_norm) if grad_norm is not None else 0.0
         opt.step()
         opt.zero_grad(set_to_none=True)
-        scheduler.step()
 
         halt_probs = q_hat.sigmoid()
         if halt_probs.gt(halt_prob_thresh).all():
             break
+
+    scheduler.step()
 
     if logger is not None and accelerator.is_main_process:
         with torch.no_grad():
@@ -406,6 +407,8 @@ if __name__ == "__main__":
             )
 
     if not args.eval_only:
+        n_steps = args.steps or (args.epochs * len(train_loader))
+
         opt = optim.AdamW(
             model.parameters(),
             lr=args.lr,
@@ -413,8 +416,21 @@ if __name__ == "__main__":
             weight_decay=args.weight_decay,
             fused=gpu,
         )
-        scheduler = optim.lr_scheduler.LinearLR(
-            opt, start_factor=0.1, total_iters=args.lr_warmup_iters
+
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            opt,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(
+                    opt,
+                    start_factor=1e-8,
+                    total_iters=args.lr_warmup_iters,
+                ),
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    opt,
+                    T_max=max(1, n_steps - args.lr_warmup_iters),
+                ),
+            ],
+            milestones=[args.lr_warmup_iters],
         )
 
         opt, scheduler = accelerator.prepare(opt, scheduler)
@@ -423,7 +439,6 @@ if __name__ == "__main__":
             accelerator.load_state(args.checkpoint)
             accelerator.print(f"Loaded checkpoint from {args.checkpoint} for training")
 
-        n_steps = args.steps or (args.epochs * len(train_loader))
         best_acc = 0.0
         for step, batch in tqdm(
             enumerate(cycle(train_loader), start=1),
