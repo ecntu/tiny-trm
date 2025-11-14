@@ -58,8 +58,8 @@ class TRM(nn.Module):
 
     def latent_recursion(self, x, y, z, n=6):
         for i in range(n):  # latent reasoning
-            z = self.net(y, z, x)
-        y = self.net(y, z)  # refine output answer
+            z = self.net(x, y, z)
+        y = self.net(torch.zeros_like(x), y, z)  # refine output answer
         return y, z
 
     def deep_recursion(self, x, y, z, n=6, T=3):
@@ -149,18 +149,15 @@ class MixerBlock(nn.Module):
 class Net(nn.Module):
     def __init__(self, seq_len, h_dim, expansion, n_layers=2):
         super().__init__()
-        self.blocks = nn.ModuleList(
-            [
+        self.blocks = nn.Sequential(
+            *(
                 MixerBlock(seq_len=seq_len, h_dim=h_dim, expansion=expansion)
                 for _ in range(n_layers)
-            ]
+            )
         )
 
-    def forward(self, y, z, x=None):
-        h = (x + y + z) if x is not None else (y + z)
-        for block in self.blocks:
-            h = block(h)
-        return rms_norm(h)
+    def forward(self, x, y, z):
+        return rms_norm(self.blocks(x + y + z))
 
 
 class InitState(nn.Module):
