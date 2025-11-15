@@ -13,13 +13,14 @@
 
 # A single-file implementation of the Tiny Recursive Model (TRM) trained on Sudoku.
 # Paper: https://arxiv.org/abs/2305.10445
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from einops import rearrange
+from einops import rearrange, reduce
 from einops.layers.torch import Reduce
 
 from accelerate import Accelerator
@@ -28,6 +29,7 @@ from datasets import load_dataset
 
 import os
 import argparse
+from collections import defaultdict
 from functools import partial
 from tqdm import tqdm
 
@@ -227,16 +229,19 @@ def train_batch(
 
 
 @torch.inference_mode()
-def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_passes=1):
+def evaluate(
+    accelerator, model, data_loader, N_supervisions=[16], n=6, T=3, k_passes=1
+):
     model.eval()
-    total_cells, correct = 0, 0
-    total_puzzles, solved = 0, 0
-
     it = (
         tqdm(data_loader, desc="Evaluating")
         if accelerator.is_main_process
         else data_loader
     )
+
+    _Ns = torch.as_tensor(sorted(N_supervisions)) - 1  # zero-indexed
+    metrics = defaultdict(int)
+    total_cells, total_puzzles = 0, 0
 
     for batch in it:
         x_input, y_true = batch["inputs"], batch["labels"]
@@ -245,29 +250,38 @@ def evaluate(accelerator, model, data_loader, N_supervision=16, n=6, T=3, k_pass
         for _ in range(k_passes):
             with accelerator.autocast():
                 y_hats_logits = model.predict(
-                    x_input, N_supervision=N_supervision, n=n, T=T
-                )
+                    x_input, N_supervision=max(N_supervisions), n=n, T=T
+                )  # (n, b, l, c)
 
-            pred_cells.append(
-                y_hats_logits[-1].argmax(-1)
-            )  # use only the last sup step
+            pred_cells.append(y_hats_logits[_Ns].argmax(dim=-1))
 
-        pred_cells = rearrange(pred_cells, "k b l -> k b l").mode(dim=0).values
+        pred_cells = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
 
         # gather across processes for global metrics
         pred_cells = accelerator.gather_for_metrics(pred_cells)
         y_true = accelerator.gather_for_metrics(y_true)
 
-        correct += (pred_cells == y_true).sum().item()
-        solved += (pred_cells == y_true).all(dim=-1).sum().item()
+        correct_cells = reduce((pred_cells == y_true), "n b l -> n", "sum")
+        solved = reduce((pred_cells == y_true).all(dim=-1), "n b -> n", "sum")
+        for N, c, s in zip(_Ns, correct_cells, solved):
+            metrics[f"acc_N{N.item() + 1}"] += c
+            metrics[f"solved_N{N.item() + 1}"] += s
+
         total_cells += y_true.numel()
         total_puzzles += y_true.shape[0]
 
         if accelerator.is_main_process:
             it.set_postfix(
-                {"sol": solved / total_puzzles, "acc": correct / total_cells}
+                {
+                    "sol": solved[-1].item() / total_puzzles,
+                    "acc": correct_cells[-1].item() / total_cells,
+                }
             )
-    return solved / total_puzzles, correct / total_cells
+
+    return {
+        k: v / (total_cells if "acc" in k else total_puzzles)
+        for k, v in metrics.items()
+    }, metrics[f"acc_N{_Ns[-1].item()}"]
 
 
 def token_corr(h, eps=1e-8):
@@ -322,7 +336,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--N_supervision", type=int, default=16)
-    parser.add_argument("--N_supervision_eval", type=int, default=None)
     parser.add_argument("--n", type=int, default=6)
     parser.add_argument("--T", type=int, default=3)
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
@@ -462,23 +475,27 @@ if __name__ == "__main__":
                 break
 
             if step % args.val_every == 0:
-                solve_rate, cell_acc = evaluate(
+                metrics, last_acc = evaluate(
                     accelerator,
                     ema,
                     val_loader,
-                    N_supervision=args.N_supervision_eval or args.N_supervision,
+                    N_supervisions=[
+                        args.N_supervision // 2,
+                        args.N_supervision,
+                        args.N_supervision * 2,
+                    ],
                     n=args.n,
                     T=args.T,
                 )
                 logger(
-                    {"val/solve_rate": solve_rate, "val/cell_accuracy": cell_acc},
+                    {f"val/{k}": v for k, v in metrics.items()},
                     step=step,
                 )
 
-                if args.checkpoint and cell_acc > best_acc:
+                if args.checkpoint and last_acc > best_acc:
                     accelerator.save_state(args.checkpoint)
                     accelerator.print(f"Checkpoint saved to {args.checkpoint}")
-                    best_acc = cell_acc
+                    best_acc = last_acc
 
     if args.skip_eval:
         accelerator.end_training()
@@ -493,7 +510,7 @@ if __name__ == "__main__":
         accelerator,
         model,
         test_loader,
-        N_supervision=args.N_supervision_eval or args.N_supervision,
+        N_supervision=args.N_supervision,
         n=args.n,
         T=args.T,
         k_passes=args.k_passes,
