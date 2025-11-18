@@ -83,23 +83,41 @@ class TRM(nn.Module):
             y_hats.append(y_hat)
         return rearrange(y_hats, "n b l c -> n b l c")
 
-    def forward(self, x_input, y, z, y_true, n=6, T=3):
+    def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
         if y is None:
             y, z = self.init_y(), self.init_z()
 
         (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
 
-        rec_loss = F.cross_entropy(
-            rearrange(y_hat.float(), "b l c -> (b l) c"),
-            rearrange(y_true, "b l -> (b l)"),
-        )
-        halt_loss = F.binary_cross_entropy_with_logits(
-            q_hat.float(),
-            (y_hat.argmax(dim=-1) == y_true).float().mean(dim=-1, keepdim=True),
-        )
-        loss = rec_loss + self.halt_loss_weight * halt_loss
+        b, l = y_true.shape
+        total_alive = alive.float().sum().clamp_min(1.0)
 
+        rec_loss = (
+            rearrange(
+                F.cross_entropy(
+                    rearrange(y_hat.float(), "b l c -> (b l) c"),
+                    rearrange(y_true, "b l -> (b l)"),
+                    reduction="none",
+                ),
+                "(b l) -> b l",
+                b=b,
+            )
+            * (alive).float()
+        ).sum() / (total_alive * l)
+
+        # or fractional: (y_hat.argmax(dim=-1) == y_true).float().mean(dim=-1, keepdim=True)
+        halt_target = (y_hat.argmax(dim=-1) == y_true).all(dim=-1, keepdim=True).float()
+        halt_loss = (
+            F.binary_cross_entropy_with_logits(
+                q_hat.float(),
+                halt_target.float(),
+                reduction="none",
+            )
+            * (alive).float()
+        ).sum() / total_alive
+
+        loss = rec_loss + self.halt_loss_weight * halt_loss
         return (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss)
 
 
@@ -188,13 +206,16 @@ def train_batch(
     logger=None,
 ):
     model.train()
+
     x_input, y_true = batch["inputs"], batch["labels"]
 
+    alive = torch.ones(x_input.shape[0], 1, device=x_input.device, dtype=torch.bool)
     y, z = None, None
+
     for step in range(N_supervision):
         with accelerator.autocast():
-            (y, z), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
-                x_input, y, z, y_true, n=n, T=T
+            (y_new, z_new), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
+                x_input, y, z, alive, y_true, n=n, T=T
             )
 
         accelerator.backward(loss)
@@ -203,8 +224,16 @@ def train_batch(
         opt.step()
         opt.zero_grad(set_to_none=True)
 
-        halt_probs = q_hat.sigmoid()
-        if halt_probs.gt(halt_prob_thresh).all():
+        should_halt = q_hat.sigmoid() >= halt_prob_thresh
+        alive = alive & ~should_halt
+
+        if step > 0:
+            _a = rearrange(alive, "b 1 -> b 1 1")
+            y, z = (torch.where(_a, y_new, y), torch.where(_a, z_new, z))
+        else:
+            y, z = y_new, z_new
+
+        if (~alive).all():
             break
 
     scheduler.step()
@@ -216,8 +245,7 @@ def train_batch(
                     "train/loss": loss,
                     "train/rec_loss": rec_loss,
                     "train/halt_loss": halt_loss,
-                    "train/halt_prob_mean": halt_probs.mean(),
-                    "train/halt_prob_std": halt_probs.std(),
+                    "train/prop_alive": alive.float().mean(),
                     "train/batch_steps": step + 1,
                     "train/lr": opt.param_groups[0]["lr"],
                     "train/token_corr_y": float(token_corr(y)),
@@ -339,7 +367,7 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=6)
     parser.add_argument("--T", type=int, default=3)
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
-    parser.add_argument("--halt_prob_thresh", type=float, default=0.95)
+    parser.add_argument("--halt_prob_thresh", type=float, default=0.5)
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
