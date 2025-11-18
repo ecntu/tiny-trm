@@ -377,6 +377,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=60_000 // 16)
     parser.add_argument("--steps", type=int, default=None)
 
+    parser.add_argument("--mixed_precision", default="no", choices=["bf16", "fp16", "no"])
     parser.add_argument("--no_compile", action="store_true")
     parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
@@ -387,7 +388,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    accelerator = Accelerator(log_with=args.log_with)
+    accelerator = Accelerator(log_with=args.log_with, mixed_precision=args.mixed_precision)
     accelerator.init_trackers(
         "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
     )
