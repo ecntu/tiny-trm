@@ -371,13 +371,15 @@ if __name__ == "__main__":
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr_warmup_iters", type=int, default=2000)
+    parser.add_argument("--lr_warmup_steps", type=int, default=2000 // 16)
     parser.add_argument("--weight_decay", type=float, default=1.0)
     parser.add_argument("--ema_beta", type=float, default=0.999**16)
     parser.add_argument("--epochs", type=int, default=60_000 // 16)
     parser.add_argument("--steps", type=int, default=None)
 
-    parser.add_argument("--mixed_precision", default="no", choices=["bf16", "fp16", "no"])
+    parser.add_argument(
+        "--mixed_precision", default="no", choices=["bf16", "fp16", "no"]
+    )
     parser.add_argument("--no_compile", action="store_true")
     parser.add_argument("--k_passes", type=int, default=1)
     parser.add_argument("--val_every", type=int, default=50)
@@ -388,7 +390,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    accelerator = Accelerator(log_with=args.log_with, mixed_precision=args.mixed_precision)
+    accelerator = Accelerator(
+        log_with=args.log_with, mixed_precision=args.mixed_precision
+    )
     accelerator.init_trackers(
         "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
     )
