@@ -466,14 +466,14 @@ if __name__ == "__main__":
                 torch.optim.lr_scheduler.LinearLR(
                     opt,
                     start_factor=1e-8,
-                    total_iters=args.lr_warmup_iters,
+                    total_iters=args.lr_warmup_steps,
                 ),
                 torch.optim.lr_scheduler.CosineAnnealingLR(
                     opt,
-                    T_max=max(1, n_steps - args.lr_warmup_iters),
+                    T_max=max(1, n_steps - args.lr_warmup_steps),
                 ),
             ],
-            milestones=[args.lr_warmup_iters],
+            milestones=[args.lr_warmup_steps],
         )
 
         opt, scheduler = accelerator.prepare(opt, scheduler)
