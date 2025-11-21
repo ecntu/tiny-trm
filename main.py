@@ -470,6 +470,7 @@ if __name__ == "__main__":
                 ),
                 torch.optim.lr_scheduler.CosineAnnealingLR(
                     opt,
+                    eta_min=args.lr * 0.05,
                     T_max=max(1, n_steps - args.lr_warmup_steps),
                 ),
             ],
