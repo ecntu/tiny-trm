@@ -227,7 +227,7 @@ def train_batch(
         should_halt = q_hat.sigmoid() >= halt_prob_thresh
         alive = alive & ~should_halt
 
-        if step > 0:
+        if step > 0 and halt_prob_thresh <= 1.0:
             _a = rearrange(alive, "b 1 -> b 1 1")
             y, z = (torch.where(_a, y_new, y), torch.where(_a, z_new, z))
         else:
@@ -460,23 +460,11 @@ if __name__ == "__main__":
             fused=gpu,
         )
 
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
+        scheduler = torch.optim.lr_scheduler.LinearLR(
             opt,
-            schedulers=[
-                torch.optim.lr_scheduler.LinearLR(
-                    opt,
-                    start_factor=1e-8,
-                    total_iters=args.lr_warmup_steps,
-                ),
-                torch.optim.lr_scheduler.CosineAnnealingLR(
-                    opt,
-                    eta_min=args.lr * 0.05,
-                    T_max=max(1, n_steps - args.lr_warmup_steps),
-                ),
-            ],
-            milestones=[args.lr_warmup_steps],
+            start_factor=1e-8,
+            total_iters=args.lr_warmup_steps,
         )
-
         opt, scheduler = accelerator.prepare(opt, scheduler)
 
         if args.checkpoint and os.path.exists(args.checkpoint):
