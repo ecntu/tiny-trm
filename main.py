@@ -306,10 +306,12 @@ def evaluate(
                 }
             )
 
-    return {
+    metrics = {
         k: v / (total_cells if "acc" in k else total_puzzles)
         for k, v in metrics.items()
-    }, metrics[f"acc_N{_Ns[-1].item()}"]
+    }
+    last_acc = metrics[f"acc_N{_Ns[-1].item() + 1}"]
+    return metrics, last_acc
 
 
 def token_corr(h, eps=1e-8):
