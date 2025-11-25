@@ -240,6 +240,9 @@ def train_batch(
 
     if logger is not None and accelerator.is_main_process:
         with torch.no_grad():
+            preds = y_hat.argmax(dim=-1)
+            correct = (preds == y_true).float().mean()
+            solved = (preds == y_true).all(dim=-1).float().mean()
             logger(
                 {
                     "train/loss": loss,
@@ -252,6 +255,8 @@ def train_batch(
                     "train/token_corr_z": float(token_corr(z)),
                     "train/logit_norm": float(y_hat.norm(dim=-1).mean()),
                     "train/grad_norm": last_grad_norm,
+                    "train/acc": correct,
+                    "train/solved": solved,
                 }
             )
 
@@ -448,7 +453,7 @@ if __name__ == "__main__":
         accelerator.log(data, step=step)
         if step and step % print_every == 0 and "train/loss" in data:
             accelerator.print(
-                f"step {step} | loss: {data['train/loss']:.4f} | g_norm: {data['train/grad_norm']:.4f}"
+                f"step {step} {' | '.join([f'{m}: {data[f"train/{m}"]:.4f}' for m in ('loss', 'grad_norm', 'acc')])}"
             )
 
     if not args.eval_only:
