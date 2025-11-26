@@ -545,7 +545,7 @@ if __name__ == "__main__":
         accelerator,
         model,
         test_loader,
-        N_supervision=args.N_supervision,
+        N_supervisions=[args.N_supervision],
         n=args.n,
         T=args.T,
         k_passes=args.k_passes,
