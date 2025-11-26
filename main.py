@@ -13,7 +13,6 @@
 
 # A single-file implementation of the Tiny Recursive Model (TRM) trained on Sudoku.
 # Paper: https://arxiv.org/abs/2305.10445
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,6 +27,7 @@ from ema_pytorch import EMA
 from datasets import load_dataset
 
 import os
+import shutil
 import argparse
 from collections import defaultdict
 from functools import partial
@@ -403,6 +403,12 @@ if __name__ == "__main__":
     accelerator.init_trackers(
         "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
     )
+    if args.checkpoint and accelerator.is_main_process:  # add script to checkpoint
+        accelerator.register_save_state_pre_hook(
+            lambda _, __, dir: os.makedirs(dir, exist_ok=True)
+            or shutil.copy(__file__, os.path.join(dir, "main.py"))
+        )
+
     device = accelerator.device
     gpu = device.type == "cuda"
     accelerator.print(f"Using: {device}, {accelerator.mixed_precision}")
