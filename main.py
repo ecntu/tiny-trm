@@ -75,13 +75,19 @@ class TRM(nn.Module):
 
     @torch.no_grad()
     def predict(self, x_input, N_supervision=16, n=6, T=3):
-        y_hats = []
+        y_hats, ys, zs = [], [], []
         y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
             (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
             y_hats.append(y_hat)
-        return rearrange(y_hats, "n b l c -> n b l c")
+            ys.append(y)
+            zs.append(z)
+        return (
+            rearrange(y_hats, "n b l c -> n b l c"),
+            rearrange(ys, "n b l d -> n b l d"),
+            rearrange(zs, "n b l d -> n b l d"),
+        )
 
     def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
@@ -282,7 +288,7 @@ def evaluate(
         pred_cells = []
         for _ in range(k_passes):
             with accelerator.autocast():
-                y_hats_logits = model.predict(
+                y_hats_logits, _, _ = model.predict(
                     x_input, N_supervision=max(N_supervisions), n=n, T=T
                 )  # (n, b, l, c)
 
@@ -317,6 +323,52 @@ def evaluate(
     }
     last_acc = metrics[f"acc_N{_Ns[-1].item() + 1}"]
     return metrics, last_acc
+
+
+# https://arxiv.org/abs/2211.09961
+@torch.no_grad()
+def asymptotic_alignment_score(
+    accelerator, model, loader, N_supervisions=[16], T=3, n=6, n_batches=None
+):
+    _Ns = torch.as_tensor(sorted(N_supervisions)) - 1  # zero-indexed
+
+    def aa_score_batch(x_input):
+        with accelerator.autocast():
+            _, ys, zs = model.predict(
+                x_input, N_supervision=max(N_supervisions), n=n, T=T
+            )
+            _, ys2, zs2 = model.predict(
+                x_input, N_supervision=max(N_supervisions), n=n, T=T
+            )
+            ys, zs, ys2, zs2 = (ys[_Ns], zs[_Ns], ys2[_Ns], zs2[_Ns])
+
+        aa_score = lambda a, b: F.cosine_similarity(
+            rearrange(a, "n b l d -> n b (l d)"),
+            rearrange(b, "n b l d -> n b (l d)"),
+            dim=-1,
+        ).sum(dim=1)
+
+        return aa_score(ys, ys2), aa_score(zs, zs2)
+
+    n_batches = n_batches or len(loader)
+    n_examples = 0
+    y_aa_score = torch.zeros(len(_Ns), device=accelerator.device)
+    z_aa_score = torch.zeros(len(_Ns), device=accelerator.device)
+
+    for _, batch in zip(range(n_batches), loader):
+        x_input = batch["inputs"].to(device)
+
+        y_aa, z_aa = aa_score_batch(x_input)
+        y_aa_score += y_aa
+        z_aa_score += z_aa
+        n_examples += x_input.size(0)
+
+    scores = {}
+    for N, y_s, z_s in zip(_Ns, y_aa_score, z_aa_score):
+        scores[f"y_aa_N{N.item() + 1}"] = y_s.item() / n_examples
+        scores[f"z_aa_N{N.item() + 1}"] = z_s.item() / n_examples
+
+    return scores
 
 
 def token_corr(h, eps=1e-8):
@@ -522,6 +574,21 @@ if __name__ == "__main__":
                     n=args.n,
                     T=args.T,
                 )
+
+                aa_scores = asymptotic_alignment_score(
+                    accelerator,
+                    model,
+                    val_loader,
+                    N_supervisions=[
+                        args.N_supervision // 2,
+                        args.N_supervision,
+                        args.N_supervision * 2,
+                    ],
+                    n=args.n,
+                    T=args.T,
+                    n_batches=8,
+                )
+                metrics.update(aa_scores)
                 logger(
                     {f"val/{k}": v for k, v in metrics.items()},
                     step=step,
