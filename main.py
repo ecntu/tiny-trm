@@ -209,14 +209,20 @@ def train_batch(
     T,
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
+    halt_exploration_prob=0.1,
     logger=None,
 ):
     model.train()
 
     x_input, y_true = batch["inputs"], batch["labels"]
+    b, device = x_input.shape[0], x_input.device
 
-    alive = torch.ones(x_input.shape[0], 1, device=x_input.device, dtype=torch.bool)
+    alive = torch.ones(b, 1, device=device, dtype=torch.bool)
     y, z = None, None
+
+    min_steps = (
+        torch.rand(b, 1, device=device) <= halt_exploration_prob
+    ) * torch.randint(low=2, high=N_supervision + 1, size=(b, 1), device=device)
 
     for step in range(N_supervision):
         with accelerator.autocast():
@@ -230,8 +236,8 @@ def train_batch(
         opt.step()
         opt.zero_grad(set_to_none=True)
 
-        should_halt = q_hat.sigmoid() >= halt_prob_thresh
-        alive = alive & ~should_halt
+        keep_alive = q_hat.sigmoid() < halt_prob_thresh
+        alive = alive & (keep_alive | (step < min_steps))
 
         if step > 0 and halt_prob_thresh <= 1.0:
             _a = rearrange(alive, "b 1 -> b 1 1")
@@ -427,6 +433,7 @@ if __name__ == "__main__":
     parser.add_argument("--T", type=int, default=3)
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
     parser.add_argument("--halt_prob_thresh", type=float, default=0.5)
+    parser.add_argument("--halt_exploration_prob", type=float, default=0.1)
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -553,6 +560,7 @@ if __name__ == "__main__":
                 n=args.n,
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
+                halt_exploration_prob=args.halt_exploration_prob,
                 logger=partial(logger, step=step, print_every=10),
             )
 
