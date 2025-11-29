@@ -210,6 +210,7 @@ def train_batch(
     halt_prob_thresh=0.5,
     max_grad_norm=1.0,
     halt_exploration_prob=0.1,
+    randomize_N_supervision=False,
     logger=None,
 ):
     model.train()
@@ -223,6 +224,9 @@ def train_batch(
     min_steps = (
         torch.rand(b, 1, device=device) <= halt_exploration_prob
     ) * torch.randint(low=2, high=N_supervision + 1, size=(b, 1), device=device)
+
+    if randomize_N_supervision:
+        N_supervision = torch.randint(2, N_supervision + 1, (1,)).item()
 
     for step in range(N_supervision):
         with accelerator.autocast():
@@ -434,6 +438,7 @@ if __name__ == "__main__":
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
     parser.add_argument("--halt_prob_thresh", type=float, default=0.5)
     parser.add_argument("--halt_exploration_prob", type=float, default=0.1)
+    parser.add_argument("--randomize_N_supervision", action="store_true")
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -561,6 +566,7 @@ if __name__ == "__main__":
                 T=args.T,
                 halt_prob_thresh=args.halt_prob_thresh,
                 halt_exploration_prob=args.halt_exploration_prob,
+                randomize_N_supervision=args.randomize_N_supervision,
                 logger=partial(logger, step=step, print_every=10),
             )
 
