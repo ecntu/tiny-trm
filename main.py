@@ -225,8 +225,10 @@ def train_batch(
         torch.rand(b, 1, device=device) <= halt_exploration_prob
     ) * torch.randint(low=2, high=N_supervision + 1, size=(b, 1), device=device)
 
-    if randomize_N_supervision:
-        N_supervision = torch.randint(2, N_supervision + 1, (1,)).item()
+    if randomize_N_supervision:  # TODO better distribution
+        N_supervision = torch.randint(
+            N_supervision // 2, N_supervision + 1, (1,)
+        ).item()
 
     for step in range(N_supervision):
         with accelerator.autocast():
