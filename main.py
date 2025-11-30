@@ -211,6 +211,7 @@ def train_batch(
     max_grad_norm=1.0,
     halt_exploration_prob=0.1,
     randomize_N_supervision=False,
+    corruption_std=0.0,
     logger=None,
 ):
     model.train()
@@ -224,6 +225,8 @@ def train_batch(
     min_steps = (
         torch.rand(b, 1, device=device) <= halt_exploration_prob
     ) * torch.randint(low=2, high=N_supervision + 1, size=(b, 1), device=device)
+
+    corruption_std = torch.rand(()).item() * corruption_std
 
     if randomize_N_supervision:  # TODO better distribution
         N_supervision = torch.randint(
@@ -250,6 +253,10 @@ def train_batch(
             y, z = (torch.where(_a, y_new, y), torch.where(_a, z_new, z))
         else:
             y, z = y_new, z_new
+
+        if corruption_std > 0.0:
+            y = y + torch.randn_like(y) * corruption_std
+            z = z + torch.randn_like(z) * corruption_std
 
         if (~alive).all():
             break
@@ -441,6 +448,7 @@ if __name__ == "__main__":
     parser.add_argument("--halt_prob_thresh", type=float, default=0.5)
     parser.add_argument("--halt_exploration_prob", type=float, default=0.1)
     parser.add_argument("--randomize_N_supervision", action="store_true")
+    parser.add_argument("--corruption_std", type=float, default=0.0)
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -569,6 +577,7 @@ if __name__ == "__main__":
                 halt_prob_thresh=args.halt_prob_thresh,
                 halt_exploration_prob=args.halt_exploration_prob,
                 randomize_N_supervision=args.randomize_N_supervision,
+                corruption_std=args.corruption_std,
                 logger=partial(logger, step=step, print_every=10),
             )
 
