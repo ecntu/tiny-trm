@@ -331,8 +331,8 @@ def evaluate(
         if accelerator.is_main_process:
             it.set_postfix(
                 {
-                    "sol": metrics[f"solved_N{_Ns[-1].item() + 1}"] / total_puzzles,
-                    "acc": metrics[f"acc_N{_Ns[-1].item() + 1}"] / total_cells,
+                    "sol": metrics[f"solved_N{N.item() + 1}"].item() / total_puzzles,
+                    "acc": metrics[f"acc_N{N.item() + 1}"].item() / total_cells,
                 }
             )
 
@@ -472,7 +472,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     accelerator = Accelerator(
-        log_with=args.log_with, mixed_precision=args.mixed_precision
+        log_with=args.log_with, mixed_precision=args.mixed_precision, cpu=True
     )
     accelerator.init_trackers(
         "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
