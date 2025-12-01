@@ -331,8 +331,8 @@ def evaluate(
         if accelerator.is_main_process:
             it.set_postfix(
                 {
-                    "sol": solved[-1].item() / total_puzzles,
-                    "acc": correct_cells[-1].item() / total_cells,
+                    "sol": metrics[f"solved_N{_Ns[-1].item() + 1}"] / total_puzzles,
+                    "acc": metrics[f"acc_N{_Ns[-1].item() + 1}"] / total_cells,
                 }
             )
 
