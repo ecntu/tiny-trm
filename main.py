@@ -183,7 +183,8 @@ class Net(nn.Module):
         )
 
     def forward(self, x, y, z):
-        return rms_norm(self.blocks(x + y + z))
+        h = rms_norm(x) + rms_norm(y) + rms_norm(z)
+        return rms_norm(self.blocks(h))
 
 
 class InitState(nn.Module):
@@ -472,7 +473,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     accelerator = Accelerator(
-        log_with=args.log_with, mixed_precision=args.mixed_precision, cpu=True
+        log_with=args.log_with, mixed_precision=args.mixed_precision
     )
     accelerator.init_trackers(
         "trm-sudoku", config=vars(args), init_kwargs={"wandb": {"save_code": True}}
