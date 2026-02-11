@@ -183,8 +183,7 @@ class Net(nn.Module):
         )
 
     def forward(self, x, y, z):
-        h = rms_norm(x) + rms_norm(y) + rms_norm(z)
-        return rms_norm(self.blocks(h))
+        return rms_norm(self.blocks(x + y + z))
 
 
 class InitState(nn.Module):
@@ -345,6 +344,7 @@ def evaluate(
     return metrics, last_acc
 
 
+# TODO compute correctly
 # https://arxiv.org/abs/2211.09961
 @torch.no_grad()
 def asymptotic_alignment_score(
@@ -443,6 +443,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--N_supervision", type=int, default=16)
+    parser.add_argument("--N_supervision_test", type=int, default=None)
     parser.add_argument("--n", type=int, default=6)
     parser.add_argument("--T", type=int, default=3)
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
@@ -471,6 +472,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_with", type=str, default=None)
 
     args = parser.parse_args()
+    args.N_supervision_test = args.N_supervision_test or args.N_supervision
 
     accelerator = Accelerator(
         log_with=args.log_with, mixed_precision=args.mixed_precision
@@ -638,7 +640,7 @@ if __name__ == "__main__":
         accelerator,
         model,
         test_loader,
-        N_supervisions=[args.N_supervision],
+        N_supervisions=[args.N_supervision_test],
         n=args.n,
         T=args.T,
         k_passes=args.k_passes,
