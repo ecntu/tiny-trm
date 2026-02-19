@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from einops import rearrange, reduce
+from einops import rearrange
 from einops.layers.torch import Reduce
 
 from ema_pytorch import EMA
@@ -29,6 +29,7 @@ import argparse
 from collections import defaultdict
 from functools import partial
 from tqdm import tqdm
+import wandb
 
 
 class TRM(nn.Module):
@@ -82,6 +83,7 @@ class TRM(nn.Module):
             rearrange(zs, "n b l d -> n b l d"),
         )
 
+    # TODO simplify losses -- single device
     def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
         if y is None:
@@ -138,6 +140,7 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
+# TODO probably get rid of
 def rms_norm(x, eps=1e-5):
     input_dtype = x.dtype
     x = x.float()
@@ -276,50 +279,73 @@ def train_batch(
             )
 
 
+def evaluate_batch(model, x_input, y_true, eval_Ns_idx, N_sup, n=6, T=3, k_passes=1):
+    """Returns {idx: (correct_cells, solved_puzzles)} for each eval index."""
+    pred_cells = []
+    for _ in range(k_passes):
+        y_hats_logits, _, _ = model.predict(x_input, N_supervision=N_sup, n=n, T=T)
+        pred_cells.append(y_hats_logits.argmax(dim=-1))
+    preds = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
+    return {
+        idx: ((preds[idx] == y_true).sum(), (preds[idx] == y_true).all(dim=-1).sum())
+        for idx in eval_Ns_idx
+    }
+
+
 @torch.inference_mode()
-def evaluate(model, device, data_loader, N_supervisions=[16], n=6, T=3, k_passes=1):
+def evaluate(model, device, data_loader, N_sup=16, n=6, T=3, k_passes=1):
     model.eval()
 
-    _Ns = torch.as_tensor(sorted(N_supervisions)) - 1  # zero-indexed
-    metrics = defaultdict(int)
+    # Powers of 2 up to N_sup: [1, 2, 4, ..., N_sup]
+    eval_Ns = [2**i for i in range(N_sup.bit_length()) if 2**i <= N_sup]
+    if N_sup not in eval_Ns:
+        eval_Ns.append(N_sup)
+    eval_Ns_idx = [N - 1 for N in eval_Ns]  # zero-indexed
+    mid_N, first_N = eval_Ns[len(eval_Ns) // 2], eval_Ns[0]
+
+    acc_sums = defaultdict(int)
+    solved_sums = defaultdict(int)
     total_cells, total_puzzles = 0, 0
 
     it = tqdm(data_loader, desc="Evaluating")
     for batch in it:
-        x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
+        x_input = batch["inputs"].to(device)
+        y_true = batch["labels"].to(device)
 
-        pred_cells = []
-        for _ in range(k_passes):
-            y_hats_logits, _, _ = model.predict(
-                x_input, N_supervision=max(N_supervisions), n=n, T=T
-            )  # (n, b, l, c)
-
-            pred_cells.append(y_hats_logits[_Ns].argmax(dim=-1))
-
-        pred_cells = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
-
-        correct_cells = reduce((pred_cells == y_true), "n b l -> n", "sum")
-        solved = reduce((pred_cells == y_true).all(dim=-1), "n b -> n", "sum")
-        for N, c, s in zip(_Ns, correct_cells, solved):
-            metrics[f"acc_N{N.item() + 1}"] += c
-            metrics[f"solved_N{N.item() + 1}"] += s
+        results = evaluate_batch(
+            model, x_input, y_true, eval_Ns_idx, N_sup, n, T, k_passes
+        )
+        for idx, N in zip(eval_Ns_idx, eval_Ns):
+            acc_sums[N] += results[idx][0]
+            solved_sums[N] += results[idx][1]
 
         total_cells += y_true.numel()
         total_puzzles += y_true.shape[0]
 
         it.set_postfix(
-            {
-                "sol": metrics[f"solved_N{N.item() + 1}"].item() / total_puzzles,
-                "acc": metrics[f"acc_N{N.item() + 1}"].item() / total_cells,
-            }
+            sol=solved_sums[N_sup].item() / total_puzzles,
+            acc=acc_sums[N_sup].item() / total_cells,
         )
 
+    acc = {N: acc_sums[N] / total_cells for N in eval_Ns}
+    solved = {N: solved_sums[N] / total_puzzles for N in eval_Ns}
+
     metrics = {
-        k: v / (total_cells if "acc" in k else total_puzzles)
-        for k, v in metrics.items()
+        "acc": acc[N_sup],
+        "solved": solved[N_sup],
+        "acc_delta_mid": acc[N_sup] - acc[mid_N],
+        "solved_delta_mid": solved[N_sup] - solved[mid_N],
+        "acc_delta_first": acc[N_sup] - acc[first_N],
+        "solved_delta_first": solved[N_sup] - solved[first_N],
     }
-    last_acc = metrics[f"acc_N{_Ns[-1].item() + 1}"]
-    return metrics, last_acc
+
+    curve_data = {
+        "N_sup": eval_Ns,
+        "acc": [acc[N] for N in eval_Ns],
+        "solved": [solved[N] for N in eval_Ns],
+    }
+
+    return metrics, curve_data
 
 
 def cycle(loader):
@@ -381,20 +407,17 @@ if __name__ == "__main__":
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--skip_eval", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--track", type=str, default=None)
+    parser.add_argument("--wandb_project", type=str, default=None)
 
     args = parser.parse_args()
     args.N_supervision_test = args.N_supervision_test or args.N_supervision
+    track = args.wandb_project is not None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
-
-    if args.track:
-        import wandb
-
-        wandb.init(project="trm-sudoku", config=vars(args), save_code=True)
-
     print(f"Using: {device}")
+
+    wandb.init(project=args.wandb_project, config=vars(args), save_code=True)
 
     model = model_factory(args, device, not args.no_compile).to(device)
     print(model)
@@ -403,7 +426,7 @@ if __name__ == "__main__":
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
     train_ds = load_dataset(ds_path, split="train")
     val_ds = load_dataset(ds_path, split="test[:1024]")
-    test_ds = load_dataset(ds_path, split="test")
+    test_ds = load_dataset(ds_path, split="test[:1024]")  # TODO reset
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
 
@@ -428,12 +451,11 @@ if __name__ == "__main__":
         update_every=1,
     ).to(device)
 
-    if args.track:
+    if track:
         wandb.watch(model, log="all", log_freq=10)
 
     def logger(data, step=None, print_every=1):
-        if args.track:
-            wandb.log(data, step=step)
+        wandb.log(data, step=step)
         if step and step % print_every == 0 and "train/loss" in data:
             print(
                 f"step {step} {' | '.join([f'{m}: {data[f"train/{m}"]:.4f}' for m in ('loss', 'grad_norm', 'acc')])}"
@@ -491,23 +513,17 @@ if __name__ == "__main__":
                 break
 
             if step % args.val_every == 0:
-                metrics, last_acc = evaluate(
+                metrics, _ = evaluate(
                     ema,
                     device,
                     val_loader,
-                    N_supervisions=[
-                        args.N_supervision // 2,
-                        args.N_supervision,
-                        args.N_supervision * 2,
-                    ],
+                    N_sup=args.N_supervision,
                     n=args.n,
                     T=args.T,
                 )
-                logger(
-                    {f"val/{k}": v for k, v in metrics.items()},
-                    step=step,
-                )
+                logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
 
+                last_acc = metrics["acc"]
                 if args.checkpoint and last_acc > best_acc:
                     torch.save(
                         {
@@ -522,8 +538,7 @@ if __name__ == "__main__":
                     best_acc = last_acc
 
     if args.skip_eval:
-        if args.track:
-            wandb.finish()
+        wandb.finish()
         exit(0)
 
     if args.checkpoint and os.path.exists(args.checkpoint):
@@ -533,15 +548,30 @@ if __name__ == "__main__":
         print(f"Loaded checkpoint from {args.checkpoint} for evaluation")
 
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
-    metrics, last_acc = evaluate(
+    metrics, curve_data = evaluate(
         model,
         device,
         test_loader,
-        N_supervisions=[args.N_supervision_test],
+        N_sup=args.N_supervision_test,
         n=args.n,
         T=args.T,
         k_passes=args.k_passes,
     )
-    logger({"test/solve_rate": metrics, "test/cell_accuracy": last_acc})
-    if args.track:
-        wandb.finish()
+    log_data = {f"test/{k}": v for k, v in metrics.items()}
+    table = wandb.Table(
+        data=[
+            [n, a, s]
+            for n, a, s in zip(
+                curve_data["N_sup"], curve_data["acc"], curve_data["solved"]
+            )
+        ],
+        columns=["N_sup", "acc", "solved"],
+    )
+    log_data["test/acc_vs_N"] = wandb.plot.line(
+        table, "N_sup", "acc", title="Test Acc vs N_sup"
+    )
+    log_data["test/solved_vs_N"] = wandb.plot.line(
+        table, "N_sup", "solved", title="Test Solved vs N_sup"
+    )
+    logger(log_data)
+    wandb.finish()
