@@ -83,7 +83,6 @@ class TRM(nn.Module):
             rearrange(zs, "n b l d -> n b l d"),
         )
 
-    # TODO simplify losses -- single device
     def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
         x = self.input_embedding(x_input)
         if y is None:
@@ -140,13 +139,8 @@ class SwiGLU(nn.Module):
         return self.W2(F.silu(self.W1(x)) * self.W3(x))
 
 
-# TODO probably get rid of
-def rms_norm(x, eps=1e-5):
-    input_dtype = x.dtype
-    x = x.float()
-    variance = x.square().mean(-1, keepdim=True)
-    x = x * torch.rsqrt(variance + eps)
-    return x.to(input_dtype)
+def rms_norm(x):
+    return F.rms_norm(x, (x.shape[-1],))
 
 
 class MixerBlock(nn.Module):
@@ -196,7 +190,6 @@ class InitState(nn.Module):
 
 def train_batch(
     model,
-    device,
     batch,
     opt,
     scheduler,
@@ -212,7 +205,7 @@ def train_batch(
 ):
     model.train()
 
-    x_input, y_true = batch["inputs"].to(device), batch["labels"].to(device)
+    x_input, y_true = batch["inputs"], batch["labels"]
     b, device = x_input.shape[0], x_input.device
 
     alive = torch.ones(b, 1, device=device, dtype=torch.bool)
@@ -293,7 +286,7 @@ def evaluate_batch(model, x_input, y_true, eval_Ns_idx, N_sup, n=6, T=3, k_passe
 
 
 @torch.inference_mode()
-def evaluate(model, device, data_loader, N_sup=16, n=6, T=3, k_passes=1):
+def evaluate(model, data_loader, N_sup=16, n=6, T=3, k_passes=1):
     model.eval()
 
     # Powers of 2 up to N_sup: [1, 2, 4, ..., N_sup]
@@ -309,8 +302,7 @@ def evaluate(model, device, data_loader, N_sup=16, n=6, T=3, k_passes=1):
 
     it = tqdm(data_loader, desc="Evaluating")
     for batch in it:
-        x_input = batch["inputs"].to(device)
-        y_true = batch["labels"].to(device)
+        x_input, y_true = batch["inputs"], batch["labels"]
 
         results = evaluate_batch(
             model, x_input, y_true, eval_Ns_idx, N_sup, n, T, k_passes
@@ -411,7 +403,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     args.N_supervision_test = args.N_supervision_test or args.N_supervision
-    track = args.wandb_project is not None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
@@ -433,15 +424,11 @@ if __name__ == "__main__":
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
 
-    workers = min(8, os.cpu_count() or 4)
+    def collate_fn(batch):
+        return {k: torch.stack([b[k] for b in batch]).to(device) for k in batch[0]}
+
     get_loader = partial(
-        DataLoader,
-        batch_size=args.batch_size,
-        drop_last=True,
-        pin_memory=gpu,
-        num_workers=workers if gpu else 0,
-        persistent_workers=workers > 0 and gpu,
-        prefetch_factor=4 if workers > 0 and gpu else None,
+        DataLoader, batch_size=args.batch_size, drop_last=True, collate_fn=collate_fn
     )
     train_loader = get_loader(train_ds, shuffle=True)
     val_loader = get_loader(val_ds, shuffle=False)
@@ -453,9 +440,6 @@ if __name__ == "__main__":
         forward_method_names=("predict",),
         update_every=1,
     ).to(device)
-
-    if track:
-        wandb.watch(model, log="all", log_freq=10)
 
     def logger(data, step=None, print_every=1):
         wandb.log(data, step=step)
@@ -488,6 +472,8 @@ if __name__ == "__main__":
             scheduler.load_state_dict(ckpt["scheduler"])
             print(f"Loaded checkpoint from {args.checkpoint} for training")
 
+        wandb.watch(model, log="all", log_freq=10)
+
         best_acc = 0.0
         for step, batch in tqdm(
             enumerate(cycle(train_loader), start=1),
@@ -496,7 +482,6 @@ if __name__ == "__main__":
         ):
             train_batch(
                 model=model,
-                device=device,
                 batch=batch,
                 opt=opt,
                 scheduler=scheduler,
@@ -518,7 +503,6 @@ if __name__ == "__main__":
             if step % args.val_every == 0:
                 metrics, _ = evaluate(
                     ema,
-                    device,
                     val_loader,
                     N_sup=args.N_supervision,
                     n=args.n,
@@ -553,7 +537,6 @@ if __name__ == "__main__":
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
     metrics, curve_data = evaluate(
         model,
-        device,
         test_loader,
         N_sup=args.N_supervision_test,
         n=args.n,
