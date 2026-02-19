@@ -424,9 +424,12 @@ if __name__ == "__main__":
     print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
     ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
-    train_ds = load_dataset(ds_path, split="train")
-    val_ds = load_dataset(ds_path, split="test[:1024]")
-    test_ds = load_dataset(ds_path, split="test[:1024]")  # TODO reset
+    train_val_ds = load_dataset(ds_path, split="train").train_test_split(
+        test_size=2048,
+        seed=42,  # TODO set seed
+    )
+    train_ds, val_ds = train_val_ds["train"], train_val_ds["test"]
+    test_ds = load_dataset(ds_path, split="test")
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
 
