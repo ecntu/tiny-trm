@@ -359,6 +359,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--N_supervision", type=int, default=16)
     parser.add_argument("--N_supervision_test", type=int, default=None)
+    parser.add_argument("--N_supervision_test_max", type=int, default=512)
     parser.add_argument("--n", type=int, default=6)
     parser.add_argument("--T", type=int, default=3)
     parser.add_argument("--halt_loss_weight", type=float, default=0.5)
@@ -533,15 +534,38 @@ if __name__ == "__main__":
         print(f"Loaded checkpoint from {args.checkpoint} for evaluation")
 
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
-    metrics, last_acc = evaluate(
+
+    # Build supervision sweep: powers of 2 from 1 up to N_supervision_test_max
+    _v, test_supervisions = 1, []
+    while _v <= args.N_supervision_test_max:
+        test_supervisions.append(_v)
+        _v *= 2
+
+    metrics, _ = evaluate(
         model,
         device,
         test_loader,
-        N_supervisions=[args.N_supervision_test],
+        N_supervisions=test_supervisions,
         n=args.n,
         T=args.T,
         k_passes=args.k_passes,
     )
-    logger({"test/solve_rate": metrics, "test/cell_accuracy": last_acc})
+    logger({f"test/{k}": v for k, v in metrics.items()})
+
+    # Log supervision-curve: solved% vs. supervision steps (log-scale x-axis)
     if args.track:
+        table = wandb.Table(columns=["supervision_steps", "solved_pct"])
+        for N in test_supervisions:
+            if f"solved_N{N}" in metrics:
+                table.add_data(N, float(metrics[f"solved_N{N}"]) * 100)
+        wandb.log(
+            {
+                "test/supervision_curve": wandb.plot.line(
+                    table,
+                    "supervision_steps",
+                    "solved_pct",
+                    title="Solve Rate vs. Supervision Steps",
+                )
+            }
+        )
         wandb.finish()
