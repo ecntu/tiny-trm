@@ -174,9 +174,15 @@ class Net(nn.Module):
                 for _ in range(n_layers)
             )
         )
+        self.x_norm, self.y_norm, self.z_norm = (
+            nn.RMSNorm(h_dim),
+            nn.RMSNorm(h_dim),
+            nn.RMSNorm(h_dim),
+        )
 
     def forward(self, x, y, z):
-        return rms_norm(self.blocks(x + y + z))
+        h = self.x_norm(x) + self.y_norm(y) + self.z_norm(z)
+        return rms_norm(self.blocks(h))
 
 
 class InitState(nn.Module):
