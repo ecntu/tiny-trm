@@ -389,11 +389,11 @@ class Config:
     # Infra
     no_compile: bool = False
     k_passes: int = 1
-    val_every: int = 50
+    val_every: int = 250
     eval_only: bool = False
     skip_eval: bool = False
     checkpoint: str | None = None
-    wandb_project: str | None = None
+    wandb_project: str = "trm-sudoku"
 
 
 if __name__ == "__main__":
@@ -402,6 +402,8 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
+    if gpu:
+        torch.set_float32_matmul_precision("high")
     print(f"Using: {device}")
 
     wandb.init(project=cfg.wandb_project, config=asdict(cfg), save_code=True)
