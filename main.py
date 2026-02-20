@@ -391,6 +391,7 @@ class Config:
     max_grad_norm: float = 1.0
     epochs: int = 60_000 // 16
     steps: int | None = None
+    data_seed: int = 42
 
     # Infra
     no_compile: bool = False
@@ -418,13 +419,11 @@ if __name__ == "__main__":
     print(model)
     print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
-    ds_path = "emiliocantuc/sudoku-extreme-1k-aug-1000"
-    train_val_ds = load_dataset(ds_path, split="train").train_test_split(
-        test_size=2048,
-        seed=42,  # TODO set seed
-    )
-    train_ds, val_ds = train_val_ds["train"], train_val_ds["test"]
-    test_ds = load_dataset(ds_path, split="test")
+    ds = load_dataset("emiliocantuc/sudoku-extreme-1k-aug-1000")
+    train_ds = ds["train"]
+    split = ds["test"].train_test_split(test_size=2048, seed=cfg.data_seed)
+    test_ds, val_ds = split["train"], split["test"]
+
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
 
