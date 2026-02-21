@@ -271,7 +271,8 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
 def evaluate(model, data_loader, N_sup, cfg):
     model.eval()
 
-    accs, solves = torch.zeros(N_sup), torch.zeros(N_sup)
+    device = next(model.parameters()).device
+    accs, solves = torch.zeros(N_sup, device=device), torch.zeros(N_sup, device=device)
     n_cells, n_puzzles = 0, 0
 
     it = tqdm(data_loader, desc="Evaluating")
