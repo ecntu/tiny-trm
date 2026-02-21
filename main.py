@@ -26,7 +26,6 @@ from ema_pytorch import EMA
 from datasets import load_dataset
 
 import os
-from collections import defaultdict
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Literal
@@ -268,73 +267,46 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
             )
 
 
-def evaluate_batch(model, x_input, y_true, eval_Ns_idx, cfg):
-    """Returns {idx: (correct_cells, solved_puzzles)} for each eval index."""
-    pred_cells = []
-    for _ in range(cfg.k_passes):
-        y_hats_logits, _, _ = model.predict(
-            x_input, N_supervision=cfg.N_supervision_test, n=cfg.n, T=cfg.T
-        )
-        pred_cells.append(y_hats_logits.argmax(dim=-1))
-    preds = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
-    return {
-        idx: ((preds[idx] == y_true).sum(), (preds[idx] == y_true).all(dim=-1).sum())
-        for idx in eval_Ns_idx
-    }
-
-
 @torch.inference_mode()
-def evaluate(model, data_loader, cfg):
+def evaluate(model, data_loader, N_sup, cfg):
     model.eval()
-    N_sup = cfg.N_supervision_test
 
-    # Powers of 2 up to N_sup: [1, 2, 4, ..., N_sup]
-    eval_Ns = [2**i for i in range(N_sup.bit_length()) if 2**i <= N_sup]
-    if N_sup not in eval_Ns:
-        eval_Ns.append(N_sup)
-    eval_Ns_idx = [N - 1 for N in eval_Ns]  # zero-indexed
-    mid_N, first_N = eval_Ns[len(eval_Ns) // 2], eval_Ns[0]
-
-    acc_sums = defaultdict(int)
-    solved_sums = defaultdict(int)
-    total_cells, total_puzzles = 0, 0
+    accs, solves = torch.zeros(N_sup), torch.zeros(N_sup)
+    n_cells, n_puzzles = 0, 0
 
     it = tqdm(data_loader, desc="Evaluating")
     for batch in it:
         x_input, y_true = batch["inputs"], batch["labels"]
 
-        results = evaluate_batch(model, x_input, y_true, eval_Ns_idx, cfg)
-        for idx, N in zip(eval_Ns_idx, eval_Ns):
-            acc_sums[N] += results[idx][0]
-            solved_sums[N] += results[idx][1]
+        pred_cells = []
+        for _ in range(cfg.k_passes):
+            y_hats_logits, _, _ = model.predict(
+                x_input, N_supervision=N_sup, n=cfg.n, T=cfg.T
+            )
+            pred_cells.append(y_hats_logits.argmax(dim=-1))
+        preds = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
 
-        total_cells += y_true.numel()
-        total_puzzles += y_true.shape[0]
+        for i in range(N_sup):
+            accs[i] += (preds[i] == y_true).sum()
+            solves[i] += (preds[i] == y_true).all(dim=-1).sum()
+
+        n_cells += y_true.numel()
+        n_puzzles += y_true.shape[0]
 
         it.set_postfix(
-            sol=solved_sums[N_sup].item() / total_puzzles,
-            acc=acc_sums[N_sup].item() / total_cells,
+            acc=accs[-1].item() / n_cells, solved=solves[-1].item() / n_puzzles
         )
 
-    acc = {N: acc_sums[N] / total_cells for N in eval_Ns}
-    solved = {N: solved_sums[N] / total_puzzles for N in eval_Ns}
-
+    accs, solves = accs / n_cells, solves / n_puzzles
     metrics = {
-        "acc": acc[N_sup],
-        "solved": solved[N_sup],
-        "acc_delta_mid": acc[N_sup] - acc[mid_N],
-        "solved_delta_mid": solved[N_sup] - solved[mid_N],
-        "acc_delta_first": acc[N_sup] - acc[first_N],
-        "solved_delta_first": solved[N_sup] - solved[first_N],
+        "acc": accs[-1],
+        "solved": solves[-1],
+        "acc_delta_mid": accs[-1] - accs[N_sup // 2],
+        "solved_delta_mid": solves[-1] - solves[N_sup // 2],
+        "acc_delta_first": accs[-1] - accs[0],
+        "solved_delta_first": solves[-1] - solves[0],
     }
-
-    curve_data = {
-        "N_sup": eval_Ns,
-        "acc": [acc[N] for N in eval_Ns],
-        "solved": [solved[N] for N in eval_Ns],
-    }
-
-    return metrics, curve_data
+    return metrics, accs, solves
 
 
 def cycle(loader):
@@ -420,9 +392,8 @@ if __name__ == "__main__":
     print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
     ds = load_dataset("emiliocantuc/sudoku-extreme-1k-aug-1000")
-    train_ds = ds["train"]
-    split = ds["test"].train_test_split(test_size=2048, seed=cfg.data_seed)
-    test_ds, val_ds = split["train"], split["test"]
+    val_test = ds["test"].train_test_split(train_size=2048, seed=cfg.data_seed)
+    train_ds, val_ds, test_ds = (ds["train"], val_test["train"], val_test["test"])
 
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
@@ -477,9 +448,6 @@ if __name__ == "__main__":
 
         wandb.watch(model, log="all", log_freq=10)
 
-        val_cfg = Config(**asdict(cfg))
-        val_cfg.N_supervision_test = cfg.N_supervision
-
         best_acc = 0.0
         for step, batch in tqdm(
             enumerate(cycle(train_loader), start=1),
@@ -501,7 +469,7 @@ if __name__ == "__main__":
                 break
 
             if step % cfg.val_every == 0:
-                metrics, _ = evaluate(ema, val_loader, val_cfg)
+                metrics, _, _ = evaluate(ema, val_loader, cfg.N_supervision, cfg)
                 logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
 
                 last_acc = metrics["acc"]
@@ -529,22 +497,16 @@ if __name__ == "__main__":
         print(f"Loaded checkpoint from {cfg.checkpoint} for evaluation")
 
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
-    metrics, curve_data = evaluate(model, test_loader, cfg)
-    log_data = {f"test/{k}": v for k, v in metrics.items()}
-    table = wandb.Table(
-        data=[
-            [n, a, s]
-            for n, a, s in zip(
-                curve_data["N_sup"], curve_data["acc"], curve_data["solved"]
-            )
-        ],
+    metrics, accs, solves = evaluate(
+        model, test_loader, N_sup=cfg.N_supervision_test, cfg=cfg
+    )
+
+    d = {f"test/{k}": v for k, v in metrics.items()}
+    t = wandb.Table(
+        data=list(zip(range(1, len(accs) + 1), accs.tolist(), solves.tolist())),
         columns=["N_sup", "acc", "solved"],
     )
-    log_data["test/acc_vs_N"] = wandb.plot.line(
-        table, "N_sup", "acc", title="Test Acc vs N_sup"
-    )
-    log_data["test/solved_vs_N"] = wandb.plot.line(
-        table, "N_sup", "solved", title="Test Solved vs N_sup"
-    )
-    logger(log_data)
+    d["test/acc-N"] = wandb.plot.line(t, "N_sup", "acc", title="Test Acc vs N")
+    d["test/solved-N"] = wandb.plot.line(t, "N_sup", "solved", title="Test Solved vs N")
+    logger(d)
     wandb.finish()
