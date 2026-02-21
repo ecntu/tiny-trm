@@ -364,6 +364,7 @@ class Config:
     epochs: int = 60_000 // 16
     steps: int | None = None
     data_seed: int = 42
+    test_size: int | None = None
 
     # Infra
     no_compile: bool = False
@@ -393,7 +394,9 @@ if __name__ == "__main__":
 
     ds = load_dataset("emiliocantuc/sudoku-extreme-1k-aug-1000")
     val_test = ds["test"].train_test_split(train_size=2048, seed=cfg.data_seed)
-    train_ds, val_ds, test_ds = (ds["train"], val_test["train"], val_test["test"])
+    train_ds, val_ds, test_ds = ds["train"], val_test["train"], val_test["test"]
+    if cfg.test_size is not None:
+        test_ds = test_ds.shuffle(seed=cfg.data_seed).select(range(cfg.test_size))
 
     for ds in (train_ds, val_ds, test_ds):
         ds.set_format(type="torch", columns=["inputs", "labels"])
