@@ -372,7 +372,7 @@ class Config:
     no_compile: bool = False
     k_passes: int = 1
     val_every: int = 250
-    eval_only: bool = False
+    test_only: bool = False
     skip_eval: bool = False
     checkpoint: str | None = None
     wandb_project: str = "trm-sudoku"
