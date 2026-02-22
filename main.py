@@ -427,7 +427,7 @@ if __name__ == "__main__":
                 f"step {step} {' | '.join([f'{m}: {data[f"train/{m}"]:.4f}' for m in ('loss', 'grad_norm', 'acc')])}"
             )
 
-    if not cfg.eval_only:
+    if not cfg.test_only:
         n_steps = cfg.steps or (cfg.epochs * len(train_loader))
 
         opt = optim.AdamW(
