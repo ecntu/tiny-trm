@@ -366,6 +366,7 @@ class Config:
     steps: int | None = None
     data_seed: int = 42
     test_size: int | None = None
+    n_augs: int = 1000
 
     # Infra
     no_compile: bool = False
@@ -393,7 +394,7 @@ if __name__ == "__main__":
     print(model)
     print("No. of parameters:", sum(p.numel() for p in model.parameters()))
 
-    ds = load_dataset("emiliocantuc/sudoku-extreme-1k-aug-1000")
+    ds = load_dataset(f"emiliocantuc/sudoku-extreme-1k-aug-{cfg.n_augs}")
     val_test = ds["test"].train_test_split(train_size=2048, seed=cfg.data_seed)
     train_ds, val_ds, test_ds = ds["train"], val_test["train"], val_test["test"]
     if cfg.test_size is not None:
