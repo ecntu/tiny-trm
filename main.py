@@ -380,7 +380,7 @@ class Config:
 
 if __name__ == "__main__":
     cfg = simple_parsing.parse(Config)
-    cfg.N_supervision_test = cfg.N_supervision_test or cfg.N_supervision
+    cfg.N_supervision_test = cfg.N_supervision_test or int(cfg.N_supervision * 4)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
