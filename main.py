@@ -87,12 +87,15 @@ class TRM(nn.Module):
             rearrange(zs, "n b l d -> n b l d") if return_states else None,
         )
 
-    def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
+    def forward(self, x_input, y, z, alive=None, y_true=None, n=6, T=3):
         x = self.input_embedding(x_input)
         if y is None:
             y, z = self.init_y(), self.init_z()
 
         (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
+
+        if y_true is None:
+            return (y, z), y_hat, q_hat, None, None
 
         b, l = y_true.shape
         total_alive = alive.float().sum().clamp_min(1.0)
@@ -230,6 +233,10 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
         opt.step()
         opt.zero_grad(set_to_none=True)
 
+        if cfg.stay_on_policy:
+            with torch.no_grad():
+                (y_new, z_new), _, _, _, _ = model(x_input, y, z, n=cfg.n, T=cfg.T)
+
         keep_alive = q_hat.sigmoid() < cfg.halt_prob_thresh
         alive = alive & (keep_alive | (step < min_steps))
 
@@ -356,6 +363,7 @@ class Config:
     halt_exploration_prob: float = 0.1
     randomize_N_supervision: bool = False
     corruption_std: float = 0.0
+    stay_on_policy: bool = False
 
     # Training
     batch_size: int = 768
