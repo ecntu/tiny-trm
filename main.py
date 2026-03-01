@@ -288,6 +288,7 @@ def evaluate(model, data_loader, N_sup, cfg):
     for batch in it:
         x_input, y_true = batch["inputs"], batch["labels"]
 
+        # TODO k passes at each step (current) or at end?
         pred_cells = []
         for _ in range(cfg.k_passes):
             y_hats_logits, _, _ = model.predict(
@@ -440,11 +441,18 @@ if __name__ == "__main__":
     if not cfg.test_only:
         n_steps = cfg.steps or (cfg.epochs * len(train_loader))
 
-        decay = {p for n, p in model.named_parameters() if p.ndim >= 2 and "embedding" not in n}
+        decay = {
+            p
+            for n, p in model.named_parameters()
+            if p.ndim >= 2 and "embedding" not in n
+        }
         opt = optim.AdamW(
             [
                 {"params": [p for p in model.parameters() if p in decay]},
-                {"params": [p for p in model.parameters() if p not in decay], "weight_decay": 0.0},
+                {
+                    "params": [p for p in model.parameters() if p not in decay],
+                    "weight_decay": 0.0,
+                },
             ],
             lr=cfg.lr,
             betas=(0.9, 0.95),
