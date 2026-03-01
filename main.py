@@ -70,19 +70,21 @@ class TRM(nn.Module):
         return (y.detach(), z.detach()), self.output_head(y), self.Q_head(y)
 
     @torch.no_grad()
-    def predict(self, x_input, N_supervision=16, n=6, T=3):
-        y_hats, ys, zs = [], [], []
+    def predict(self, x_input, N_supervision=16, n=6, T=3, return_states=True):
+        y_hats = []
+        ys, zs = ([], []) if return_states else (None, None)
         y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
             (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
             y_hats.append(y_hat)
-            ys.append(y)
-            zs.append(z)
+            if return_states:
+                ys.append(y)
+                zs.append(z)
         return (
             rearrange(y_hats, "n b l c -> n b l c"),
-            rearrange(ys, "n b l d -> n b l d"),
-            rearrange(zs, "n b l d -> n b l d"),
+            rearrange(ys, "n b l d -> n b l d") if return_states else None,
+            rearrange(zs, "n b l d -> n b l d") if return_states else None,
         )
 
     def forward(self, x_input, y, z, alive, y_true, n=6, T=3):
@@ -282,7 +284,7 @@ def evaluate(model, data_loader, N_sup, cfg):
         pred_cells = []
         for _ in range(cfg.k_passes):
             y_hats_logits, _, _ = model.predict(
-                x_input, N_supervision=N_sup, n=cfg.n, T=cfg.T
+                x_input, N_supervision=N_sup, n=cfg.n, T=cfg.T, return_states=False
             )
             pred_cells.append(y_hats_logits.argmax(dim=-1))
         preds = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
