@@ -432,8 +432,12 @@ if __name__ == "__main__":
     if not cfg.test_only:
         n_steps = cfg.steps or (cfg.epochs * len(train_loader))
 
+        decay = {p for n, p in model.named_parameters() if p.ndim >= 2 and "embedding" not in n}
         opt = optim.AdamW(
-            model.parameters(),
+            [
+                {"params": [p for p in model.parameters() if p in decay]},
+                {"params": [p for p in model.parameters() if p not in decay], "weight_decay": 0.0},
+            ],
             lr=cfg.lr,
             betas=(0.9, 0.95),
             weight_decay=cfg.weight_decay,
