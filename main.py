@@ -384,7 +384,7 @@ class Config:
     k_passes: int = 1
     val_every: int = 250
     test_only: bool = False
-    skip_eval: bool = False
+    skip_test: bool = False
     checkpoint: str | None = None
     wandb_project: str = "trm-sudoku"
 
