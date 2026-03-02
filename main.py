@@ -502,7 +502,7 @@ if __name__ == "__main__":
                     print(f"Checkpoint saved to {cfg.checkpoint}")
                     best_acc = last_acc
 
-    if cfg.skip_eval:
+    if cfg.skip_test:
         wandb.finish()
         exit(0)
 
