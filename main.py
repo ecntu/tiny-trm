@@ -24,10 +24,9 @@ from einops.layers.torch import Reduce
 
 from ema_pytorch import EMA
 from datasets import load_dataset
-
-import os
 from dataclasses import asdict, dataclass
 from functools import partial
+from pathlib import Path
 from typing import Literal
 from tqdm import tqdm
 import simple_parsing
@@ -367,6 +366,7 @@ class Config:
     stay_on_policy: bool = False
 
     # Training
+    seed: int = 42
     batch_size: int = 768
     lr: float = 1e-4
     lr_warmup_steps: int = 2000 // 16
@@ -392,12 +392,15 @@ class Config:
 if __name__ == "__main__":
     cfg = simple_parsing.parse(Config)
     cfg.N_supervision_test = cfg.N_supervision_test or int(cfg.N_supervision * 4)
+    ckpt_path = Path(cfg.checkpoint) if cfg.checkpoint else None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
     if gpu:
         torch.set_float32_matmul_precision("high")
-    print(f"Using: {device}")
+        torch.cuda.manual_seed_all(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    print(f"Using: {device} with seed {cfg.seed}")
 
     wandb.init(project=cfg.wandb_project, config=asdict(cfg), save_code=True)
 
@@ -420,7 +423,11 @@ if __name__ == "__main__":
     get_loader = partial(
         DataLoader, batch_size=cfg.batch_size, drop_last=True, collate_fn=collate_fn
     )
-    train_loader = get_loader(train_ds, shuffle=True)
+    train_loader = get_loader(
+        train_ds,
+        shuffle=True,
+        generator=torch.Generator(device="cpu").manual_seed(cfg.seed),
+    )
     val_loader = get_loader(val_ds, shuffle=False)
     test_loader = get_loader(test_ds, shuffle=False)
 
@@ -454,13 +461,13 @@ if __name__ == "__main__":
             start_factor=1e-8,
             total_iters=cfg.lr_warmup_steps,
         )
-        if cfg.checkpoint and os.path.exists(cfg.checkpoint):
-            ckpt = torch.load(cfg.checkpoint, map_location=device, weights_only=False)
+        if ckpt_path and ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             model.load_state_dict(ckpt["model"])
             ema.load_state_dict(ckpt["ema"])
             opt.load_state_dict(ckpt["opt"])
             scheduler.load_state_dict(ckpt["scheduler"])
-            print(f"Loaded checkpoint from {cfg.checkpoint} for training")
+            print(f"Loaded checkpoint from {ckpt_path} for training")
 
         wandb.watch(model, log="all", log_freq=10)
 
@@ -489,7 +496,8 @@ if __name__ == "__main__":
                 logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
 
                 last_acc = metrics["acc"]
-                if cfg.checkpoint and last_acc > best_acc:
+                if ckpt_path and last_acc > best_acc:
+                    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(
                         {
                             "model": model.state_dict(),
@@ -497,20 +505,20 @@ if __name__ == "__main__":
                             "opt": opt.state_dict(),
                             "scheduler": scheduler.state_dict(),
                         },
-                        cfg.checkpoint,
+                        ckpt_path,
                     )
-                    print(f"Checkpoint saved to {cfg.checkpoint}")
+                    print(f"Checkpoint saved to {ckpt_path}")
                     best_acc = last_acc
 
     if cfg.skip_test:
         wandb.finish()
         exit(0)
 
-    if cfg.checkpoint and os.path.exists(cfg.checkpoint):
-        ckpt = torch.load(cfg.checkpoint, map_location=device, weights_only=False)
+    if ckpt_path and ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         ema.load_state_dict(ckpt["ema"])
-        print(f"Loaded checkpoint from {cfg.checkpoint} for evaluation")
+        print(f"Loaded checkpoint from {ckpt_path} for evaluation")
 
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
     metrics, accs, solves = evaluate(
