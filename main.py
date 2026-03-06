@@ -392,7 +392,7 @@ class Config:
 if __name__ == "__main__":
     cfg = simple_parsing.parse(Config)
     cfg.N_supervision_test = cfg.N_supervision_test or int(cfg.N_supervision * 4)
-    ckpt_path = Path(cfg.checkpoint) if cfg.checkpoint else None
+    ckpt_path = Path(cfg.checkpoint or "tmp.pt")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = device.type == "cuda"
@@ -461,7 +461,7 @@ if __name__ == "__main__":
             start_factor=1e-8,
             total_iters=cfg.lr_warmup_steps,
         )
-        if ckpt_path and ckpt_path.exists():
+        if ckpt_path.exists():
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             model.load_state_dict(ckpt["model"])
             ema.load_state_dict(ckpt["ema"])
@@ -496,7 +496,7 @@ if __name__ == "__main__":
                 logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
 
                 last_acc = metrics["acc"]
-                if ckpt_path and last_acc > best_acc:
+                if last_acc > best_acc:
                     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(
                         {
@@ -514,7 +514,7 @@ if __name__ == "__main__":
         wandb.finish()
         exit(0)
 
-    if ckpt_path and ckpt_path.exists():
+    if ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         ema.load_state_dict(ckpt["ema"])
@@ -530,6 +530,7 @@ if __name__ == "__main__":
         data=list(zip(range(1, len(accs) + 1), accs.tolist(), solves.tolist())),
         columns=["N_sup", "acc", "solved"],
     )
+    t.get_dataframe().to_csv(ckpt_path.with_suffix(".csv"), index=False)
     d["test/acc-N"] = wandb.plot.line(t, "N_sup", "acc", title="Test Acc vs N")
     d["test/solved-N"] = wandb.plot.line(t, "N_sup", "solved", title="Test Solved vs N")
     logger(d)
