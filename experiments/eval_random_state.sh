@@ -11,20 +11,20 @@ for mode in random buffer; do
         checkpoint_name="small_init=${mode}_k=${train_k}_seed=${seed}"
 
         for k in 1 3 5 7; do
-            for k_mode in conf mode; do
+            for k_agg in conf mode; do
 
-                # skip redundant k_mode when k=1
-                if [ "$k" -eq 1 ] && [ "$k_mode" = "mode" ]; then continue; fi
+                # skip redundant k_agg when k=1
+                if [ "$k" -eq 1 ] && [ "$k_agg" = "mode" ]; then continue; fi
 
-                echo "=== init_state=$mode seed=$seed k_passes=$k k_mode=$k_mode ==="
+                echo "=== init_state=$mode seed=$seed k_passes=$k k_agg=$k_agg ==="
 
                 uv run main.py --batch_size 128 --h_dim 256 --halt_loss_weight 0.0 --halt_prob_thresh 2.0 \
                     --steps 10_000 --test_only --N_sup_test 32 --test_size 8192 \
-                    --k_passes $k --k_mode $k_mode \
+                    --k_passes $k --k_agg $k_agg \
                     --init_state "$mode" --seed "$seed" \
                     --checkpoint "models/${checkpoint_name}.pt"
 
-                cp "models/${checkpoint_name}.csv" "results/eval_random/${checkpoint_name}_k${k}_${k_mode}.csv"
+                cp "models/${checkpoint_name}.csv" "results/eval_random/${checkpoint_name}_k${k}_${k_agg}.csv"
             done
         done
     done
