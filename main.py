@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from einops import rearrange
+from einops import rearrange, repeat
 from einops.layers.torch import Reduce
 
 from ema_pytorch import EMA
@@ -70,18 +70,19 @@ class TRM(nn.Module):
 
     @torch.no_grad()
     def predict(self, x_input, N_supervision=16, n=6, T=3, return_states=True):
-        y_hats = []
-        ys, zs = ([], []) if return_states else (None, None)
+        y_hats, q_hats, ys, zs = [], [], [], []
         y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
         for step in range(N_supervision):
-            (y, z), y_hat, _ = self.deep_recursion(x, y, z, n=n, T=T)
+            (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
             y_hats.append(y_hat)
+            q_hats.append(q_hat)
             if return_states:
                 ys.append(y)
                 zs.append(z)
         return (
             rearrange(y_hats, "n b l c -> n b l c"),
+            rearrange(q_hats, "n b 1 -> n b 1"),
             rearrange(ys, "n b l d -> n b l d") if return_states else None,
             rearrange(zs, "n b l d -> n b l d") if return_states else None,
         )
@@ -287,14 +288,23 @@ def evaluate(model, data_loader, N_sup, cfg):
     for batch in it:
         x_input, y_true = batch["inputs"], batch["labels"]
 
-        # TODO k passes at each step (current) or at end?
-        pred_cells = []
+        pred_cells, confs = [], []
         for _ in range(cfg.k_passes):
-            y_hats_logits, _, _ = model.predict(
+            y_hats_logits, q_hats_logits, _, _ = model.predict(
                 x_input, N_supervision=N_sup, n=cfg.n, T=cfg.T, return_states=False
             )
             pred_cells.append(y_hats_logits.argmax(dim=-1))
-        preds = rearrange(pred_cells, "k n b l -> k n b l").mode(dim=0).values
+            confs.append(q_hats_logits)
+
+        confs = rearrange(confs, "k n b 1 -> k n b")
+        preds = rearrange(pred_cells, "k n b l -> k n b l")
+        if cfg.k_agg == "conf":
+            best_k = repeat(confs.argmax(dim=0), "n b -> 1 n b l", l=preds.shape[-1])
+            preds = rearrange(
+                torch.take_along_dim(preds, best_k, dim=0), "1 n b l -> n b l"
+            )
+        else:
+            preds = preds.mode(dim=0).values
 
         for i in range(N_sup):
             accs[i] += (preds[i] == y_true).sum()
@@ -382,6 +392,7 @@ class Config:
     # Infra
     no_compile: bool = False
     k_passes: int = 1
+    k_agg: Literal["conf", "mode"] = "conf"
     val_every: int = 250
     test_only: bool = False
     skip_test: bool = False
