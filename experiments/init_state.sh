@@ -1,12 +1,14 @@
 #!/bin/bash
 # Compare init_state=random vs init_state=buffer across 3 seeds with small model (without halting)
 
+mkdir -p models/init_random
+
 for seed in 1 2 3; do
   for mode in random buffer; do
 
     # For now, hardcode k=3 for random init
     k_passes=$( [ "$mode" = "random" ] && echo 3 || echo 1 )
-    checkpoint="models/small_init=${mode}_k=${k_passes}_seed=${seed}.pt"
+    checkpoint="models/init_random/small_init=${mode}_k=${k_passes}_seed=${seed}.pt"
 
     if [ -f "$checkpoint" ]; then
       echo "Checkpoint $checkpoint exists; skipping."
