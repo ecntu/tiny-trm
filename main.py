@@ -24,7 +24,7 @@ from einops.layers.torch import Reduce
 
 from ema_pytorch import EMA
 from datasets import load_dataset
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -503,8 +503,29 @@ if __name__ == "__main__":
                 break
 
             if step % cfg.val_every == 0:
-                metrics, _, _ = evaluate(ema, val_loader, cfg.N_sup, cfg)
-                logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
+                metrics, _, _ = evaluate(
+                    ema, val_loader, cfg.N_sup, replace(cfg, k_passes=1)
+                )
+                d = {f"val/{k}": v for k, v in metrics.items()}
+                if cfg.k_passes > 1:
+                    m_mode, _, _ = evaluate(
+                        ema,
+                        val_loader,
+                        cfg.N_sup,
+                        replace(cfg, k_passes=cfg.k_passes, k_agg="mode"),
+                    )
+                    m_conf, _, _ = evaluate(
+                        ema,
+                        val_loader,
+                        cfg.N_sup,
+                        replace(cfg, k_passes=cfg.k_passes, k_agg="conf"),
+                    )
+                    d["val/mode_delta_acc"] = m_mode["acc"] - metrics["acc"]
+                    d["val/mode_delta_solved"] = m_mode["solved"] - metrics["solved"]
+                    d["val/conf_delta_acc"] = m_conf["acc"] - metrics["acc"]
+                    d["val/conf_delta_solved"] = m_conf["solved"] - metrics["solved"]
+
+                logger(d, step=step)
 
                 last_acc = metrics["acc"]
                 if last_acc > best_acc:
