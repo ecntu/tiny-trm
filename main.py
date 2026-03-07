@@ -69,22 +69,22 @@ class TRM(nn.Module):
         return (y.detach(), z.detach()), self.output_head(y), self.Q_head(y)
 
     @torch.no_grad()
-    def predict(self, x_input, N_supervision=16, n=6, T=3, return_states=True):
+    def predict(self, x_input, N_sup=16, n=6, T=3, ret_states=True):
         y_hats, q_hats, ys, zs = [], [], [], []
         y, z = self.init_y(), self.init_z()
         x = self.input_embedding(x_input)
-        for step in range(N_supervision):
+        for step in range(N_sup):
             (y, z), y_hat, q_hat = self.deep_recursion(x, y, z, n=n, T=T)
             y_hats.append(y_hat)
             q_hats.append(q_hat)
-            if return_states:
+            if ret_states:
                 ys.append(y)
                 zs.append(z)
         return (
             rearrange(y_hats, "n b l c -> n b l c"),
             rearrange(q_hats, "n b 1 -> n b 1"),
-            rearrange(ys, "n b l d -> n b l d") if return_states else None,
-            rearrange(zs, "n b l d -> n b l d") if return_states else None,
+            rearrange(ys, "n b l d -> n b l d") if ret_states else None,
+            rearrange(zs, "n b l d -> n b l d") if ret_states else None,
         )
 
     def forward(self, x_input, y, z, alive=None, y_true=None, n=6, T=3):
@@ -206,7 +206,7 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
 
     x_input, y_true = batch["inputs"], batch["labels"]
     b, device = x_input.shape[0], x_input.device
-    N_sup = cfg.N_supervision
+    N_sup = cfg.N_sup
 
     alive = torch.ones(b, 1, device=device, dtype=torch.bool)
     y, z = None, None
@@ -217,7 +217,7 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
 
     corruption_std = torch.rand(()).item() * cfg.corruption_std
 
-    if cfg.randomize_N_supervision:  # TODO better distribution
+    if cfg.randomize_N_sup:  # TODO better distribution
         N_sup = torch.randint(N_sup // 2, N_sup + 1, (1,), device=device).item()
 
     for step in range(N_sup):
@@ -291,7 +291,7 @@ def evaluate(model, data_loader, N_sup, cfg):
         pred_cells, confs = [], []
         for _ in range(cfg.k_passes):
             y_hats_logits, q_hats_logits, _, _ = model.predict(
-                x_input, N_supervision=N_sup, n=cfg.n, T=cfg.T, return_states=False
+                x_input, N_sup=N_sup, n=cfg.n, T=cfg.T, ret_states=False
             )
             pred_cells.append(y_hats_logits.argmax(dim=-1))
             confs.append(q_hats_logits)
@@ -364,14 +364,14 @@ class Config:
     init_state: Literal["buffer", "random"] = "buffer"
 
     # TRM recursion
-    N_supervision: int = 16
-    N_supervision_test: int | None = None
+    N_sup: int = 16
+    N_sup_test: int | None = None
     n: int = 6
     T: int = 3
     halt_loss_weight: float = 0.5
     halt_prob_thresh: float = 0.5
     halt_exploration_prob: float = 0.1
-    randomize_N_supervision: bool = False
+    randomize_N_sup: bool = False
     corruption_std: float = 0.0
     stay_on_policy: bool = False
 
@@ -402,7 +402,7 @@ class Config:
 
 if __name__ == "__main__":
     cfg = simple_parsing.parse(Config)
-    cfg.N_supervision_test = cfg.N_supervision_test or int(cfg.N_supervision * 4)
+    cfg.N_sup_test = cfg.N_sup_test or int(cfg.N_sup * 4)
     ckpt_path = Path(cfg.checkpoint or "tmp.pt")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -503,7 +503,7 @@ if __name__ == "__main__":
                 break
 
             if step % cfg.val_every == 0:
-                metrics, _, _ = evaluate(ema, val_loader, cfg.N_supervision, cfg)
+                metrics, _, _ = evaluate(ema, val_loader, cfg.N_sup, cfg)
                 logger({f"val/{k}": v for k, v in metrics.items()}, step=step)
 
                 last_acc = metrics["acc"]
@@ -532,9 +532,7 @@ if __name__ == "__main__":
         print(f"Loaded checkpoint from {ckpt_path} for evaluation")
 
     ema.copy_params_from_ema_to_model()  # always evaluate EMA model
-    metrics, accs, solves = evaluate(
-        model, test_loader, N_sup=cfg.N_supervision_test, cfg=cfg
-    )
+    metrics, accs, solves = evaluate(model, test_loader, N_sup=cfg.N_sup_test, cfg=cfg)
 
     d = {f"test/{k}": v for k, v in metrics.items()}
     t = wandb.Table(

@@ -14,8 +14,8 @@ for seed in 1 2 3; do
     fi
     echo "Starting training for $checkpoint"
 
-    uv run main.py --batch_size 128 --h_dim 256 --N_supervision 8 --halt_loss_weight 0.0 --halt_prob_thresh 2.0 \
-      --steps 10_000 --test_size 8192 --N_supervision_test 256 --k_passes "$k_passes" \
+    uv run main.py --batch_size 128 --h_dim 256 --N_sup 8 --halt_loss_weight 0.0 --halt_prob_thresh 2.0 \
+      --steps 10_000 --test_size 8192 --N_sup_test 256 --k_passes "$k_passes" \
       --init_state "$mode" \
       --checkpoint "$checkpoint" \
       --seed "$seed"
