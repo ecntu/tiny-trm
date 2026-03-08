@@ -217,12 +217,23 @@ def train_batch(model, batch, opt, scheduler, cfg, logger=None):
 
     corruption_std = torch.rand(()).item() * cfg.corruption_std
 
-    if cfg.randomize_N_sup:  # TODO better distribution
+    if cfg.rand_N_sup:  # TODO better distribution
         N_sup = torch.randint(N_sup // 2, N_sup + 1, (1,), device=device).item()
 
-    for step in range(N_sup):
+    ns = (
+        torch.randint(1, cfg.n + 1, size=(N_sup,), device=device)
+        if cfg.rand_n
+        else cfg.n * torch.ones(N_sup, dtype=torch.int16, device=device)
+    )
+    T = (
+        torch.randint(1, cfg.T + 1, size=(N_sup,), device=device)
+        if cfg.rand_T
+        else cfg.T * torch.ones(N_sup, dtype=torch.int16, device=device)
+    )
+
+    for step, n, T in zip(range(N_sup), ns, T):
         (y_new, z_new), y_hat, q_hat, loss, (rec_loss, halt_loss) = model(
-            x_input, y, z, alive, y_true, n=cfg.n, T=cfg.T
+            x_input, y, z, alive, y_true, n=n, T=T
         )
 
         loss.backward()
@@ -371,7 +382,9 @@ class Config:
     halt_loss_weight: float = 0.5
     halt_prob_thresh: float = 0.5
     halt_exploration_prob: float = 0.1
-    randomize_N_sup: bool = False
+    rand_N_sup: bool = False
+    rand_n: bool = False
+    rand_T: bool = False
     corruption_std: float = 0.0
     stay_on_policy: bool = False
 
